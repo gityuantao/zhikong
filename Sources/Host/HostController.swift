@@ -31,8 +31,10 @@ final class HostController: NSObject {
     private var enableButton: NSButton!
     private var refreshButton: NSButton!
 
-    /// 当前远控码(动态生成,可刷新;不写死在配置里)。
+    /// 当前远控码(动态生成、**持久化**:不每次启动都换,重启沿用上次;只在点「刷新」时换)。
     private var currentRoom = ""
+    /// 持久化远控码的 UserDefaults 键(域=bundle id com.zhikong.app)。
+    private static let savedRoomKey = "zhikong.hostRoom"
     /// 外网中转配置(若有)。决定服务走中转还是局域网,以及展示的远控码。
     private var relayConfig: RelayConfig?
     /// 是否允许被远程控制(开关)。关 → 停止服务,中转上无 Host 在场,连不上。
@@ -157,8 +159,14 @@ final class HostController: NSObject {
                 adaptive = AdaptiveBitrateController(start: wanBitrate, floor: floor, ceiling: ceiling)
                 NSLog("[直控] 自适应码率开启:起始%dM 下限%dM 上限%dM", wanBitrate/1_000_000, floor/1_000_000, ceiling/1_000_000)
             }
-            // 远控码:**动态生成**(不写死);ZHIKONG_ROOM 设了则用固定码(测试/常驻)。
-            currentRoom = relay.room.isEmpty ? RoomCode.generate() : relay.room
+            // 远控码:ZHIKONG_ROOM 设了则用固定码(测试/常驻);否则**持久化**——
+            // 沿用上次保存的码(重启不变),首次运行才随机生成并存下。点「刷新」才换。
+            if !relay.room.isEmpty {
+                currentRoom = relay.room
+            } else {
+                currentRoom = UserDefaults.standard.string(forKey: Self.savedRoomKey) ?? RoomCode.generate()
+                UserDefaults.standard.set(currentRoom, forKey: Self.savedRoomKey)
+            }
             relayConfig = relay.with(room: currentRoom)
             captionLabel.stringValue = "远控码"
             codeLabel.stringValue = currentRoom
@@ -220,10 +228,11 @@ final class HostController: NSObject {
         applyServing()
     }
 
-    /// 刷新远控码:生成新码、旧码立即失效(已连的控制端会断,需用新码重连)。
+    /// 刷新远控码:生成新码并持久化、旧码立即失效(已连的控制端会断,需用新码重连)。
     @objc private func refreshCode() {
         guard relayConfig != nil else { return }   // 局域网无码
         currentRoom = RoomCode.generate()
+        UserDefaults.standard.set(currentRoom, forKey: Self.savedRoomKey)   // 存下,重启沿用这个新码
         relayConfig = relayConfig?.with(room: currentRoom)
         codeLabel.stringValue = currentRoom
         clientConnected = false

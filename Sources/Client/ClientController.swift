@@ -41,6 +41,17 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var recvFrameCount = 0
     private var feedbackTimer: Timer?
 
+    /// 连接阶段状态机:点「连接」→ `connecting`(留在小窗等待),拿到正向信号(被控端在线 / 收到首帧)
+    /// 才打开大会话窗;超时/失败 → 留在小窗直接报错,**绝不打开黑屏大窗**。
+    private var connecting = false
+    private var connectTimeoutTimer: Timer?
+    /// 本次连接是否收到过中转在线帧(用来区分失败原因:"被控端不在线" vs "连不上中转")。
+    private var sawPeerPresence = false
+    private static let connectTimeout: TimeInterval = 8
+    /// 会话中被控端掉线的宽限:超过它仍未恢复 → 判定被控端已退出,自动回连接窗(不卡在冻结画面)。
+    private var peerLostTimer: Timer?
+    private static let peerLostGrace: TimeInterval = 1.5
+
     /// 启动控制端(由顶层 AppDelegate 在选角色后调用)。
     func start() {
         buildConnectWindow()
@@ -134,17 +145,73 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // MARK: - 连接 / 会话切换
 
     @objc private func connectTapped() {
+        guard !connecting, !sessionWindow.isVisible else { return }   // 防重复点 / 已在会话
         if let base = relayConfigBase {   // 外网
             let code = RoomCode.normalize(codeField.stringValue)   // 去空格 + 转大写,避免大小写不匹配
-            guard !code.isEmpty else { connectStatus.stringValue = "请输入远控码"; return }
+            guard !code.isEmpty else { showConnectError("请输入远控码"); return }
             codeField.stringValue = code
             UserDefaults.standard.set(code, forKey: "zhikong.lastRoom")   // 记住,下次预填
+            beginConnecting()
             conn.reconnect(to: base.with(room: code))   // 首次连接/换房间统一走 reconnect
             startFeedbackTimer()
         } else {                          // 局域网
+            beginConnecting()
             conn.start()
         }
-        openSession()
+        // 注意:此处**不再**直接 openSession()。会话窗只在拿到正向信号(被控端在线 / 收到首帧)后才开,
+        // 见 onPeerPresence / onPacket → openSession();失败则 connectTimedOut() 留在小窗报错。
+    }
+
+    /// 进入"连接中"状态:禁用按钮、起超时计时,清空上次画面状态。
+    private func beginConnecting() {
+        connecting = true
+        firstFrameReceived = false
+        peerOnline = false
+        sawPeerPresence = false
+        controlView.clear()
+        connectButton.isEnabled = false
+        connectButton.title = "连接中…"
+        connectStatus.textColor = .secondaryLabelColor
+        connectStatus.stringValue = relayConfigBase != nil ? "正在连接…" : "正在搜索局域网被控 Mac…"
+        connectTimeoutTimer?.invalidate()
+        connectTimeoutTimer = Timer.scheduledTimer(withTimeInterval: ClientController.connectTimeout, repeats: false) { [weak self] _ in
+            self?.connectTimedOut()
+        }
+    }
+
+    /// 超时仍未拿到正向信号 → 按"为什么没连上"给定向失败提示,留在小窗。
+    private func connectTimedOut() {
+        guard connecting else { return }
+        let reason: String
+        if relayConfigBase == nil {
+            reason = "未发现局域网被控端。请确认对方已打开「直控」选『被控端』，且在同一网络。"
+        } else if sawPeerPresence {
+            reason = "被控端不在线。请确认对方已打开「直控」、勾选『允许远程控制』，且远控码一致。"
+        } else {
+            reason = "连不上中转。请检查网络，或中转地址配置(~/.zhikong/relay.conf)。"
+        }
+        failConnect(reason)
+    }
+
+    /// 连接失败:停连接、复位按钮、红字报错(留在小窗,不开会话窗)。
+    private func failConnect(_ reason: String) {
+        conn.stop()
+        feedbackTimer?.invalidate(); feedbackTimer = nil
+        endConnecting()
+        showConnectError(reason)
+    }
+
+    private func showConnectError(_ text: String) {
+        connectStatus.textColor = .systemRed
+        connectStatus.stringValue = text
+    }
+
+    /// 退出"连接中"状态(成功开会话或失败都调):复位按钮、停超时计时。
+    private func endConnecting() {
+        connecting = false
+        connectTimeoutTimer?.invalidate(); connectTimeoutTimer = nil
+        connectButton.isEnabled = true
+        connectButton.title = "连接"
     }
 
     /// 在远控码输入框里按回车 = 点连接。只在真实回车键时触发,故不会启动自动连(不像默认按钮 keyEquivalent)。
@@ -156,18 +223,18 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         return false
     }
 
+    /// 打开大会话窗——**仅在连接中拿到正向信号时触发一次**(被控端在线 / 收到首帧)。
+    /// `endConnecting()` 后 `connecting=false`,二次触发即 no-op(幂等)。
     private func openSession() {
-        firstFrameReceived = false
-        peerOnline = false
-        controlView.clear()                 // 起始纯黑,不残留上次画面
-        sessionStatus.isHidden = false
-        sessionStatus.stringValue = "正在连接被控端…"   // 中转在线状态到达前的中性提示
-        startNoVideoTimer()
+        guard connecting else { return }
+        endConnecting()
         connectWindow.orderOut(nil)
         sessionWindow.center()
         sessionWindow.makeKeyAndOrderFront(nil)
         sessionWindow.makeFirstResponder(controlView)
         NSApp.activate(ignoringOtherApps: true)
+        updateSessionOverlay()                       // 据已知状态显示"接收画面…"/已出画面则隐藏
+        if !firstFrameReceived { startNoVideoTimer() }
     }
 
     /// 据"是否已出画面 / 被控端是否在线"刷新浮层。
@@ -207,18 +274,50 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         sessionStatus.isHidden = true
     }
 
-    /// 会话窗口被关闭 → 断开,回到连接窗口(不退出 app)。
+    /// 会话窗口被用户关闭 → 断开,回到连接窗口(不退出 app)。
     func windowWillClose(_ notification: Notification) {
         guard (notification.object as? NSWindow) === sessionWindow else { return }
         // 用退出会话前的状态给连接窗口一个有意义的提示(被控端是否在线),而非笼统的"已断开"。
         let lastStatus = firstFrameReceived ? "" : (peerOnline ? "被控端在线但未收到画面(检查屏幕录制/口令)" : "被控端不在线")
-        conn.stop()
-        feedbackTimer?.invalidate(); feedbackTimer = nil
-        noVideoTimer?.invalidate(); noVideoTimer = nil
-        audioPlayer.reset()
+        teardownSession()
+        connectStatus.textColor = .secondaryLabelColor
         connectStatus.stringValue = lastStatus
         connectWindow.makeKeyAndOrderFront(nil)
         connectWindow.makeFirstResponder(codeField)
+    }
+
+    /// 被控端掉线(被动退出):停连接、回连接窗、给出原因——而非卡在冻结画面。
+    /// 由 peerLostTimer(外网 presence=false 宽限后)/ 局域网直连断开 触发。
+    private func leaveSession(reason: String) {
+        teardownSession()
+        sessionWindow.orderOut(nil)
+        connectStatus.textColor = .systemOrange
+        connectStatus.stringValue = reason
+        connectWindow.makeKeyAndOrderFront(nil)
+        connectWindow.makeFirstResponder(codeField)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// 统一清理会话相关连接/计时/播放与状态(回到干净的"未连接")。
+    private func teardownSession() {
+        conn.stop()
+        feedbackTimer?.invalidate(); feedbackTimer = nil
+        noVideoTimer?.invalidate(); noVideoTimer = nil
+        peerLostTimer?.invalidate(); peerLostTimer = nil
+        endConnecting()
+        audioPlayer.reset()
+        controlView.clear()
+        firstFrameReceived = false
+        peerOnline = false
+    }
+
+    /// 会话中被控端 presence 掉为离线 → 起宽限计时;期内未恢复(对方真退出/刷新码)即回连接窗。
+    private func startPeerLostTimer() {
+        peerLostTimer?.invalidate()
+        peerLostTimer = Timer.scheduledTimer(withTimeInterval: ClientController.peerLostGrace, repeats: false) { [weak self] _ in
+            guard let self, !self.peerOnline, self.sessionWindow.isVisible else { return }
+            self.leaveSession(reason: "被控端已离线（已退出或刷新了远控码），请重新连接")
+        }
     }
 
     // MARK: - 连接回调 / 捕获
@@ -227,12 +326,29 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         conn.onStateChange = { [weak self] text in
             DispatchQueue.main.async { self?.connectStatus.stringValue = text }
         }
-        // 中转报来被控端在线状态 → 驱动会话浮层(即时、准确)。
+        // 中转报来被控端在线状态。驱动三件事:
+        //  ① 连接中 + 在线 → 打开会话窗(正向信号);② 连接中 + 不在线 → 留在小窗等待;
+        //  ③ 会话中 + 掉线 → 起宽限,超时回连接窗(被控端退出);④ 会话中 + 恢复在线 → 取消宽限、续播。
         conn.onPeerPresence = { [weak self] present in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.sawPeerPresence = true
                 self.peerOnline = present
-                self.updateSessionOverlay()
+                if present {
+                    self.peerLostTimer?.invalidate(); self.peerLostTimer = nil
+                    if self.connecting { self.openSession(); return }
+                    self.updateSessionOverlay()
+                } else {
+                    if self.connecting {
+                        self.connectStatus.stringValue = "被控端暂未在线,等待对方开启…"
+                    } else if self.sessionWindow.isVisible {
+                        self.firstFrameReceived = false
+                        self.controlView.clear()           // 不残留冻结画面
+                        self.sessionStatus.isHidden = false
+                        self.sessionStatus.stringValue = "被控端已断开…"
+                        self.startPeerLostTimer()
+                    }
+                }
             }
         }
         conn.onAudioPacket = { [weak self] packet in self?.audioPlayer.play(packet) }
@@ -240,14 +356,21 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             guard let self else { return }
             self.audioPlayer.reset()
             DispatchQueue.main.async {
-                // 中转连接断开 → 清画面、复位、重连中(被控端在线状态会在重连后重新到达)。
                 self.firstFrameReceived = false
-                self.peerOnline = false
                 self.controlView.clear()
-                if self.sessionWindow.isVisible {
-                    self.sessionStatus.isHidden = false
-                    self.sessionStatus.stringValue = "连接断开,重连中…"
-                    self.startNoVideoTimer()
+                if self.relayConfigBase == nil {
+                    // 局域网:直连断开 = 被控端没了(无中转可重连)。
+                    self.peerOnline = false
+                    if self.sessionWindow.isVisible { self.leaveSession(reason: "被控端已断开") }
+                    // 局域网连接中找不到被控端不会触发本回调,由 connectTimedOut 兜底。
+                } else {
+                    // 外网:我与中转的链路断了 → 中转 2s 自动重连;**不动 peerOnline**——
+                    // 被控端在不在只由 presence 帧判定(链路断≠对端退出),重连后会重发 presence 校正。
+                    if self.sessionWindow.isVisible {
+                        self.sessionStatus.isHidden = false
+                        self.sessionStatus.stringValue = "连接中断,重连中…"
+                        self.startNoVideoTimer()
+                    }
                 }
             }
         }
@@ -261,7 +384,11 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 NSLog("[直控-Client] 重建 CMSampleBuffer 失败(pts=\(packet.pts), key=\(packet.isKeyframe))")
                 return
             }
-            DispatchQueue.main.async { self.onFirstVideoFrame(); self.controlView.enqueue(sample) }
+            DispatchQueue.main.async {
+                self.onFirstVideoFrame()        // 标记已出画面 + 隐藏浮层
+                self.openSession()              // 幂等:连接中收到首帧 = 正向信号 → 开窗;已在会话则 no-op
+                self.controlView.enqueue(sample)
+            }
         }
     }
 
@@ -333,6 +460,8 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         audioPlayer.stop()
         clipboardSync.stop()
         feedbackTimer?.invalidate()
+        connectTimeoutTimer?.invalidate()
+        peerLostTimer?.invalidate()
         conn.stop()
     }
     /// 控制端非常驻:关连接窗口=退出 app(关会话窗口只是回连接窗口,见 windowWillClose)。
