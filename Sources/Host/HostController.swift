@@ -47,65 +47,65 @@ final class HostController: NSObject {
 
     /// 启动被控端(由顶层 AppDelegate 在选角色后调用)。
     func start() {
-        let w: CGFloat = 340, h: CGFloat = 248
+        let w: CGFloat = 360, h: CGFloat = 234
+        let leftX: CGFloat = 22                 // 统一左边距;所有内容与「切换角色」左对齐
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
                           styleMask: [.titled, .closable, .miniaturizable],
                           backing: .buffered, defer: false)
         window.title = "直控 — 被控端"
         guard let content = window.contentView else { return }
 
-        // ‹ 切换角色(左上角)
+        // ‹ 切换角色(左上角,与下方内容左对齐:补偿按钮内边距 ~5pt)
         let back = makeLinkButton("‹ 切换角色", target: self, action: #selector(switchRoleTapped))
-        back.frame = NSRect(x: 12, y: h - 30, width: 110, height: 18)
+        back.frame = NSRect(x: leftX - 5, y: h - 32, width: 110, height: 18)
         content.addSubview(back)
 
-        // 标题("远控码"/"局域网模式")
+        // "远控码" / "局域网模式" 标题(左)
         captionLabel = NSTextField(labelWithString: "远控码")
         captionLabel.font = .systemFont(ofSize: 12, weight: .medium)
         captionLabel.textColor = .secondaryLabelColor
-        captionLabel.alignment = .center
-        captionLabel.frame = NSRect(x: 0, y: h - 70, width: w, height: 16)
+        captionLabel.alignment = .left
+        captionLabel.frame = NSRect(x: leftX, y: h - 64, width: 200, height: 15)
         content.addSubview(captionLabel)
 
-        // 远控码大字(点击复制)
+        // 远控码大字(左,点击复制)
         codeLabel = NSTextField(labelWithString: "—")
-        codeLabel.font = .monospacedSystemFont(ofSize: 34, weight: .bold)
-        codeLabel.alignment = .center
-        codeLabel.frame = NSRect(x: 0, y: h - 118, width: w, height: 44)
+        codeLabel.font = .monospacedSystemFont(ofSize: 32, weight: .bold)
+        codeLabel.alignment = .left
+        codeLabel.frame = NSRect(x: leftX, y: h - 106, width: 214, height: 38)
         codeLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(copyCode)))
         content.addSubview(codeLabel)
 
-        // 复制提示 / 反馈(点击远控码即复制)
-        copyHint = NSTextField(labelWithString: "点击远控码可复制")
-        copyHint.font = .systemFont(ofSize: 11)
-        copyHint.textColor = .tertiaryLabelColor
-        copyHint.alignment = .center
-        copyHint.frame = NSRect(x: 0, y: h - 138, width: w, height: 14)
-        content.addSubview(copyHint)
-
-        // 刷新远控码(旧码立即失效,更安全)
-        refreshButton = NSButton(title: "↻ 刷新远控码", target: self, action: #selector(refreshCode))
+        // 刷新远控码(放在远控码右侧,占用横向空间,不挤成一列)
+        refreshButton = NSButton(title: "↻ 刷新", target: self, action: #selector(refreshCode))
         refreshButton.bezelStyle = .rounded
         refreshButton.controlSize = .small
         refreshButton.sizeToFit()
-        let rbw = max(refreshButton.frame.width, 124)
-        refreshButton.frame = NSRect(x: (w - rbw) / 2, y: h - 170, width: rbw, height: 22)
+        let rbw = max(refreshButton.frame.width, 72)
+        refreshButton.frame = NSRect(x: w - leftX - rbw, y: h - 100, width: rbw, height: 26)
         content.addSubview(refreshButton)
 
-        // 允许远程控制开关(居中)
+        // 复制提示 / 反馈(左,在远控码下方)
+        copyHint = NSTextField(labelWithString: "点击远控码可复制")
+        copyHint.font = .systemFont(ofSize: 11)
+        copyHint.textColor = .tertiaryLabelColor
+        copyHint.alignment = .left
+        copyHint.frame = NSRect(x: leftX, y: h - 128, width: 220, height: 14)
+        content.addSubview(copyHint)
+
+        // 允许远程控制开关(左)
         enableButton = NSButton(checkboxWithTitle: "允许远程控制", target: self, action: #selector(toggleServing(_:)))
         enableButton.state = .on
         enableButton.sizeToFit()
-        let ebw = enableButton.frame.width
-        enableButton.frame = NSRect(x: (w - ebw) / 2, y: 52, width: ebw, height: 20)
+        enableButton.frame = NSRect(x: leftX, y: 56, width: enableButton.frame.width, height: 20)
         content.addSubview(enableButton)
 
-        // 连接状态(小字,居中)
+        // 连接状态(左,带圆点)
         statusLabel = NSTextField(labelWithString: "○ 等待连接")
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
-        statusLabel.alignment = .center
-        statusLabel.frame = NSRect(x: 0, y: 20, width: w, height: 18)
+        statusLabel.alignment = .left
+        statusLabel.frame = NSRect(x: leftX, y: 24, width: w - leftX * 2, height: 18)
         content.addSubview(statusLabel)
 
         window.center()

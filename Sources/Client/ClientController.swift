@@ -140,7 +140,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         connectWindow.setFrameOrigin(NSPoint(x: connectWindow.frame.origin.x, y: topY - connectWindow.frame.height))
 
         let backY = contentH - topPad - backH
-        backButton.frame = NSRect(x: 12, y: backY, width: 110, height: backH)
+        backButton.frame = NSRect(x: padX - 5, y: backY, width: 110, height: backH)   // 与输入框左缘对齐(补偿按钮内边距)
         let rowY = backY - gapBackRow - rowH
         let fieldW = w - padX - btnW - 8 - padX
         codeField.frame = NSRect(x: padX, y: rowY, width: fieldW, height: rowH)
