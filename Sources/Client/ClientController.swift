@@ -80,7 +80,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // MARK: - 窗口构建
 
     private func buildConnectWindow() {
-        let w: CGFloat = 380, h: CGFloat = 200
+        let w: CGFloat = 380, h: CGFloat = 252
         connectWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
                                  styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         connectWindow.title = "直控 — 连接"
@@ -90,28 +90,32 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         captionLabel.font = .systemFont(ofSize: 12, weight: .medium)
         captionLabel.textColor = .secondaryLabelColor
         captionLabel.alignment = .center
-        captionLabel.frame = NSRect(x: 0, y: h - 50, width: w, height: 16)
+        captionLabel.frame = NSRect(x: 0, y: h - 46, width: w, height: 16)
         connectWindow.contentView?.addSubview(captionLabel)
 
         codeField = NSTextField(string: "")
         codeField.placeholderString = "输入被控端显示的远控码"
         codeField.font = .monospacedSystemFont(ofSize: 18, weight: .bold)
         codeField.alignment = .center
-        codeField.frame = NSRect(x: 40, y: h - 92, width: w - 80, height: 30)
+        codeField.frame = NSRect(x: 40, y: h - 88, width: w - 80, height: 30)
         codeField.delegate = self   // 回车连接靠 delegate(只在真按回车时触发,不会启动时自动连)
         connectWindow.contentView?.addSubview(codeField)
 
         connectButton = NSButton(title: "连接", target: self, action: #selector(connectTapped))
         connectButton.bezelStyle = .rounded
-        connectButton.frame = NSRect(x: (w - 120) / 2, y: 48, width: 120, height: 30)
+        connectButton.frame = NSRect(x: (w - 120) / 2, y: h - 130, width: 120, height: 30)
         connectWindow.contentView?.addSubview(connectButton)
 
-        connectStatus = NSTextField(labelWithString: "")
+        // 多行自动换行:失败原因(被控端不在线/连不上中转等)可能较长,需完整显示不截断。
+        connectStatus = NSTextField(wrappingLabelWithString: "")
         connectStatus.font = .systemFont(ofSize: 11)
         connectStatus.textColor = .secondaryLabelColor
         connectStatus.alignment = .center
-        connectStatus.lineBreakMode = .byTruncatingTail
-        connectStatus.frame = NSRect(x: 10, y: 16, width: w - 20, height: 16)
+        connectStatus.isEditable = false
+        connectStatus.isSelectable = false
+        connectStatus.maximumNumberOfLines = 0
+        connectStatus.lineBreakMode = .byWordWrapping
+        connectStatus.frame = NSRect(x: 14, y: 12, width: w - 28, height: 96)
         connectWindow.contentView?.addSubview(connectStatus)
     }
 
