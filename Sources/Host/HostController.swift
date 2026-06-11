@@ -53,6 +53,9 @@ final class HostController: NSObject {
                           styleMask: [.titled, .closable, .miniaturizable],
                           backing: .buffered, defer: false)
         window.title = "直控 — 被控端"
+        // 🔴 必须置 false:被控端关窗后常驻(Dock 可唤回)。默认 true 会在关窗时释放 window,
+        // 之后 showWindow() 访问已释放的 window → objc_retain 野指针崩溃。
+        window.isReleasedWhenClosed = false
         guard let content = window.contentView else { return }
 
         // ‹ 切换角色(左上角,左缘与下方内容精确对齐)
