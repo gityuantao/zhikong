@@ -15,14 +15,17 @@ final class HEVCEncoder {
 
     private var session: VTCompressionSession?
 
-    func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime) {
+    func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, forceKeyframe: Bool = false) {
         if session == nil {
             setup(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
         }
         guard let session else { return }
+        // 静止重发时强制关键帧:新连入的控制端无需等下一个关键帧即可解出画面。
+        let frameProps: CFDictionary? = forceKeyframe
+            ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
         VTCompressionSessionEncodeFrame(
             session, imageBuffer: pixelBuffer, presentationTimeStamp: pts,
-            duration: .invalid, frameProperties: nil, infoFlagsOut: nil
+            duration: .invalid, frameProperties: frameProps, infoFlagsOut: nil
         ) { [weak self] status, _, sbuf in
             guard status == noErr, let sbuf, let self else { return }
             self.handleEncoded(sbuf)

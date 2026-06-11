@@ -8,6 +8,9 @@ final class ScreenCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
     /// 系统音频帧回调(被控机正在播放的声音)。在独立的音频队列上触发,不与视频争用。
     var onAudioSampleBuffer: ((CMSampleBuffer) -> Void)?
     var onError: ((Error) -> Void)?
+    /// 屏幕静止(ScreenCaptureKit 只在内容变化时给 `.complete` 帧)时,按低频重发**最后一帧**(强制关键帧)。
+    /// 否则静止画面不产生任何帧 → 新连入的控制端只能看到黑屏(等用户动一下才出画面)。
+    var onIdleResend: ((CVImageBuffer, CMTime) -> Void)?
 
     /// 捕获分辨率长边上限(像素)。外网模式下设 ~1920:把分辨率降下来,**同码率下画质显著更好**
     /// (4Mbps 编 1080p 比编 5K 清晰得多)。nil = 原生分辨率(局域网默认)。
@@ -17,6 +20,11 @@ final class ScreenCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private let sampleQueue = DispatchQueue(label: "com.zhikong.capture.samples")
     private let audioQueue = DispatchQueue(label: "com.zhikong.capture.audio")
+    // 静止重发:缓存最后一帧 + 上次投递时刻(秒,host 时钟);定时器与 .screen 回调同在 sampleQueue,无需加锁。
+    private var lastImageBuffer: CVImageBuffer?
+    private var lastDeliverySeconds: Double = 0
+    private var idleTimer: DispatchSourceTimer?
+    private static let idleResendInterval = 0.5   // 静止时重发周期(秒)
 
     /// 按长边上限等比缩放出捕获分辨率(HEVC 要求偶数边,向下取偶)。maxDimension 为空或屏幕本就更小 → 原样。
     static func outputSize(displayW: Int, displayH: Int, maxDimension: Int?) -> (width: Int, height: Int) {
@@ -49,9 +57,28 @@ final class ScreenCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         try await stream.startCapture()
         self.stream = stream
+        startIdleResend()
+    }
+
+    /// 静止重发心跳:屏幕约 `idleResendInterval` 内无新 `.complete` 帧 → 用缓存的最后一帧补发一次(强制关键帧)。
+    private func startIdleResend() {
+        let timer = DispatchSource.makeTimerSource(queue: sampleQueue)
+        timer.schedule(deadline: .now() + Self.idleResendInterval, repeating: Self.idleResendInterval)
+        timer.setEventHandler { [weak self] in
+            guard let self, let pb = self.lastImageBuffer else { return }
+            let now = CMClockGetTime(CMClockGetHostTimeClock())
+            if now.seconds - self.lastDeliverySeconds >= Self.idleResendInterval * 0.8 {
+                self.lastDeliverySeconds = now.seconds
+                self.onIdleResend?(pb, now)
+            }
+        }
+        timer.resume()
+        idleTimer = timer
     }
 
     func stop() {
+        idleTimer?.cancel(); idleTimer = nil
+        lastImageBuffer = nil
         stream?.stopCapture { _ in }
         stream = nil
     }
@@ -64,6 +91,11 @@ final class ScreenCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
                   let statusRaw = attachments.first?[.status] as? Int,
                   let status = SCFrameStatus(rawValue: statusRaw),
                   status == .complete else { return }
+            // 缓存最后一帧 + 投递时刻,供静止重发(host 时钟,与重发用的 CMClockGetHostTimeClock 同源)。
+            if let pb = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                lastImageBuffer = pb
+                lastDeliverySeconds = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+            }
             onSampleBuffer?(sampleBuffer)
         case .audio:
             onAudioSampleBuffer?(sampleBuffer)

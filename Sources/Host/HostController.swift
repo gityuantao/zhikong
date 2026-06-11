@@ -203,6 +203,11 @@ final class HostController: NSObject {
             guard let self, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
             self.encoder.encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         }
+        // 屏幕静止时低频重发最后一帧(强制关键帧):静止画面/新连入也能立刻看到,不必等用户去动一下。
+        // 与 onSampleBuffer 同在捕获队列上串行调用,编码 PTS 仍单调(host 时钟)。
+        capture.onIdleResend = { [weak self] pb, pts in
+            self?.encoder.encode(pb, pts: pts, forceKeyframe: true)
+        }
         capture.onError = { error in NSLog("[直控] 捕获错误: \(error)") }
 
         // 音频侧:系统音频帧 → (AAC/PCM)AudioPacket → 经同一连接推给 Client(回调在捕获音频队列,线程安全)。
