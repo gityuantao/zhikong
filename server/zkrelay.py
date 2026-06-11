@@ -8,13 +8,14 @@
 原样穿过本中转。
 
 协议:连上后先发一行 ASCII 握手 `ZKRELAY <HOST|CLIENT> <ROOM>\n`,之后即原始字节流双向转发。
-房间号 ROOM 同时充当"共享口令"(只有知道 ROOM 的两端才会被配上)。
+房间号 ROOM 只用于**配对准入**(知道 ROOM 的两端才会被配上),不是加密口令。
 
 实时策略:某端没有对端在场时,其数据直接丢弃(实时流不缓存旧帧)。
 
-⚠️ 安全(MVP→正式前必做):本中转**明文转发**。ROOM 提供基础准入,但链路未加密——
-正式使用前要么在 Host/Client 间走端到端 TLS(经本中转透传),要么至少逐跳 TLS 到本服务器。
-当前明文仅用于打通验证,别用它传敏感屏幕内容。
+安全模型:两端 app 自带**端到端加密**(ChaCha20-Poly1305,密钥由 ZHIKONG_SECRET 经 HKDF 派生,
+口令绝不发给本中转)——本中转只看得到明文的 4 字节长度前缀、房间码与密文,无法解密/篡改会话内容。
+⚠️ 例外:两端未配独立口令时退化为"房间码派生密钥"(app 启动会告警),此时能看到握手行的
+链路窃听者可推出密钥,等于没加密——正式使用务必两端配同一强口令。
 
 用法:python3 zkrelay.py [PORT]   (默认 7777;记得在主机商安全组放行该 TCP 端口)
 """
@@ -52,10 +53,11 @@ def _notify(writer, present):
 
 async def handle(reader, writer):
     addr = writer.get_extra_info("peername")
-    # 1) 握手行
+    # 1) 握手行。ValueError:readline 在行长超过 asyncio 流默认 limit(64KB)时抛——
+    #    乱连的非直控客户端常触发;不接住会让本协程带异常退出且 writer 永不关闭(连接泄漏)。
     try:
         line = await asyncio.wait_for(reader.readline(), timeout=HANDSHAKE_TIMEOUT)
-    except (asyncio.TimeoutError, ConnectionError):
+    except (asyncio.TimeoutError, ConnectionError, ValueError):
         writer.close()
         return
     parts = line.decode("ascii", "ignore").strip().split()
