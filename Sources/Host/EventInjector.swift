@@ -22,8 +22,12 @@ final class EventInjector {
         let b = CGDisplayBounds(CGMainDisplayID())
         switch event {
         case .mouseMove(let nx, let ny):
-            lastPoint = CGPoint(x: b.minX + CGFloat(nx) * b.width,
-                                y: b.minY + CGFloat(ny) * b.height)
+            // 网络来的 Float64 可能是 NaN/Inf/越界(线格式允许任意位型)——钳到 0..1,非有限直接丢,
+            // 否则 CGPoint(NaN) 会让 WindowServer 的光标状态错乱。
+            guard nx.isFinite, ny.isFinite else { return }
+            let cx = min(max(nx, 0), 1), cy = min(max(ny, 0), 1)
+            lastPoint = CGPoint(x: b.minX + CGFloat(cx) * b.width,
+                                y: b.minY + CGFloat(cy) * b.height)
             let type: CGEventType = leftDown ? .leftMouseDragged : .mouseMoved
             post(CGEvent(mouseEventSource: nil, mouseType: type,
                          mouseCursorPosition: lastPoint, mouseButton: .left))
@@ -38,9 +42,14 @@ final class EventInjector {
                          mouseButton: left ? .left : .right))
 
         case .scroll(let dx, let dy):
-            // wheel1=垂直(dy),wheel2=水平(dx);像素单位。Int32 截断对滚动量足够。
+            // wheel1=垂直(dy),wheel2=水平(dx);像素单位。
+            // 必须先钳:`Int32(_: Double)` 对 NaN/Inf/超 Int32 范围会直接 trap——
+            // 这是网络载荷,异常值不能换来被控端崩溃。±10000 px/事件远超真实触控板滚动量。
+            guard dx.isFinite, dy.isFinite else { return }
+            let cdx = Int32(min(max(dx, -10_000), 10_000))
+            let cdy = Int32(min(max(dy, -10_000), 10_000))
             post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
-                         wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0))
+                         wheel1: cdy, wheel2: cdx, wheel3: 0))
 
         case .key(let keyCode, let down, let modifiers):
             let e = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down)
