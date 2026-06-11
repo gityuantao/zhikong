@@ -21,6 +21,22 @@ enum AppMenu {
         appMenu.addItem(withTitle: "退出\(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
+        // 编辑菜单 —— 没有它,文本框里的 ⌘C/⌘V/⌘X/⌘A 无处投递(标准编辑快捷键靠 Edit 菜单项的
+        // key equivalent 路由到第一响应者=字段编辑器)。这正是"输入远控码粘贴不上"的根因。
+        // action=nil(默认)→ 走响应者链 → 聚焦的 NSTextField 字段编辑器响应 cut:/copy:/paste:/selectAll:。
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: Selector(("cut:")), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "拷贝", action: Selector(("copy:")), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: Selector(("paste:")), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: Selector(("selectAll:")), keyEquivalent: "a")
+        editItem.submenu = editMenu
+
         // 窗口菜单(最小化/缩放/前置)。
         let windowItem = NSMenuItem()
         mainMenu.addItem(windowItem)
