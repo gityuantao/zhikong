@@ -1,8 +1,12 @@
-# 直控 ZhiKong
-
-[![CI](https://github.com/gityuantao/zhikong/actions/workflows/ci.yml/badge.svg)](https://github.com/gityuantao/zhikong/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Platform: macOS 14+](https://img.shields.io/badge/Platform-macOS%2014%2B-blue.svg)
+<div align="center">
+  <img src="assets/logo.png" alt="直控 ZhiKong" width="120" />
+  <h1>直控 ZhiKong</h1>
+  <p>
+    <a href="https://github.com/gityuantao/zhikong/actions/workflows/ci.yml"><img src="https://github.com/gityuantao/zhikong/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+    <img src="https://img.shields.io/badge/Platform-macOS%2014%2B-blue.svg" alt="Platform: macOS 14+" />
+  </p>
+</div>
 
 A low-latency, native macOS remote-desktop app: one Mac controls another over LAN or
 the internet, with end-to-end encryption. Built from scratch with ScreenCaptureKit,
