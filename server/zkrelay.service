@@ -1,0 +1,20 @@
+[Unit]
+Description=直控 WAN 中转 relay (zkrelay)
+Documentation=https://github.com/gityuantao/zhikong
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 端口 7777;改端口同时改两端 relay.conf / ZHIKONG_RELAY
+ExecStart=/usr/bin/python3 /root/zkrelay.py 7777
+Restart=always
+RestartSec=2
+User=root
+# 轻量硬化:relay 只需网络,不写文件系统
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

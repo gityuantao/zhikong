@@ -1,0 +1,21 @@
+# Xcode / 构建产物
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+.swiftpm/
+
+# macOS
+.DS_Store
+
+# 依赖
+Pods/
+.build/
+
+# 凭证 / 本地配置(绝不提交:含中转地址与端到端口令)
+*.local
+.env
+relay.conf
+.zhikong/

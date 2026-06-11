@@ -1,0 +1,52 @@
+name: ZhiKong
+options:
+  bundleIdPrefix: com.zhikong
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "ZhiKong Dev"
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS: "NO"
+    PRODUCT_NAME: "$(TARGET_NAME)"
+    GENERATE_INFOPLIST_FILE: "YES"
+targets:
+  # 单 app:启动选角色(控制端/被控端),两端合一。
+  ZhiKong:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/App
+      - path: Sources/Shared
+      - path: Sources/Host
+      - path: Sources/Client
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zhikong.app
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: Sources/App/Info.plist
+    entitlements:
+      path: Sources/App/ZhiKong.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+  ZhiKongTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: ZhiKong
+schemes:
+  ZhiKong:
+    build:
+      targets:
+        ZhiKong: all
+        ZhiKongTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [ZhiKongTests]
