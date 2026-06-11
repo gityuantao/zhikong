@@ -51,11 +51,15 @@ VideoToolbox (HEVC), and Network.framework — no third-party SDKs.
 
 ## Screenshots
 
-_Coming soon._ To add: drop PNGs into [`assets/screenshots/`](assets/screenshots/) and reference them here.
+<p align="center">
+  <img src="assets/screenshots/role-picker.png" alt="Pick a role on launch" width="380">
+  &nbsp;&nbsp;
+  <img src="assets/screenshots/host.png" alt="Host window" width="380">
+</p>
 
-- `role-picker.png` — the launch role chooser (控制端 / 被控端)
-- `host.png` — Host window showing the remote code + the *"允许远程控制"* toggle
-- `session.png` — Controller viewing the remote screen
+<p align="center"><em>Left: pick a role on launch. Right: the Host (被控端) window — remote code, refresh, and the “允许远程控制” toggle.</em></p>
+
+> Controller session view (控制端 viewing the remote screen): screenshot to be added.
 
 ## How it works
 
