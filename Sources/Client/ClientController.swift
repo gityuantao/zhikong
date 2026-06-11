@@ -145,7 +145,8 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // MARK: - 连接 / 会话切换
 
     @objc private func connectTapped() {
-        guard !connecting, !sessionWindow.isVisible else { return }   // 防重复点 / 已在会话
+        if connecting { cancelConnecting(); return }   // 连接中再点同一按钮 = 取消
+        guard !sessionWindow.isVisible else { return }   // 已在会话不处理
         if let base = relayConfigBase {   // 外网
             let code = RoomCode.normalize(codeField.stringValue)   // 去空格 + 转大写,避免大小写不匹配
             guard !code.isEmpty else { showConnectError("请输入远控码"); return }
@@ -169,8 +170,8 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         peerOnline = false
         sawPeerPresence = false
         controlView.clear()
-        connectButton.isEnabled = false
-        connectButton.title = "连接中…"
+        connectButton.isEnabled = true       // 连接中保持可点 → 充当「取消」
+        connectButton.title = "取消"
         connectStatus.textColor = .secondaryLabelColor
         connectStatus.stringValue = relayConfigBase != nil ? "正在连接…" : "正在搜索局域网被控 Mac…"
         connectTimeoutTimer?.invalidate()
@@ -191,6 +192,15 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             reason = "连不上中转。请检查网络，或中转地址配置(~/.zhikong/relay.conf)。"
         }
         failConnect(reason)
+    }
+
+    /// 连接中点「取消」:停止本次连接尝试,回到空闲(可重新输码再连)。
+    private func cancelConnecting() {
+        conn.stop()
+        feedbackTimer?.invalidate(); feedbackTimer = nil
+        endConnecting()
+        connectStatus.textColor = .secondaryLabelColor
+        connectStatus.stringValue = "已取消"
     }
 
     /// 连接失败:停连接、复位按钮、红字报错(留在小窗,不开会话窗)。
