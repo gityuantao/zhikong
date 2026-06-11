@@ -55,9 +55,9 @@ final class HostController: NSObject {
         window.title = "直控 — 被控端"
         guard let content = window.contentView else { return }
 
-        // ‹ 切换角色(左上角,与下方内容左对齐:补偿按钮内边距 ~5pt)
-        let back = makeLinkButton("‹ 切换角色", target: self, action: #selector(switchRoleTapped))
-        back.frame = NSRect(x: leftX - 5, y: h - 32, width: 110, height: 18)
+        // ‹ 切换角色(左上角,左缘与下方内容精确对齐)
+        let back = makeLinkLabel("‹ 切换角色", target: self, action: #selector(switchRoleTapped))
+        back.frame = NSRect(x: leftX, y: h - 32, width: 110, height: 18)
         content.addSubview(back)
 
         // "远控码" / "局域网模式" 标题(左)

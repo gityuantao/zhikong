@@ -13,7 +13,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var codeField: NSTextField!
     private var connectButton: NSButton!
     private var connectStatus: NSTextField!
-    private var backButton: NSButton!
+    private var backButton: NSTextField!
     /// 顶层 AppDelegate 注入:点「切换角色」时停掉本端、回到角色选择窗。
     var onSwitchRole: (() -> Void)?
     // 会话窗口(大)
@@ -89,8 +89,8 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         connectWindow.isReleasedWhenClosed = false
         guard let content = connectWindow.contentView else { return }
 
-        // ‹ 切换角色(左上角)
-        backButton = makeLinkButton("‹ 切换角色", target: self, action: #selector(switchRoleTapped))
+        // ‹ 切换角色(左上角,左缘与输入框对齐)
+        backButton = makeLinkLabel("‹ 切换角色", target: self, action: #selector(switchRoleTapped))
         content.addSubview(backButton)
 
         // 一行:远控码输入框(左)+「连接」按钮(右)
@@ -140,7 +140,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         connectWindow.setFrameOrigin(NSPoint(x: connectWindow.frame.origin.x, y: topY - connectWindow.frame.height))
 
         let backY = contentH - topPad - backH
-        backButton.frame = NSRect(x: padX - 5, y: backY, width: 110, height: backH)   // 与输入框左缘对齐(补偿按钮内边距)
+        backButton.frame = NSRect(x: padX, y: backY, width: 110, height: backH)   // 左缘与输入框精确对齐(label 无内边距)
         let rowY = backY - gapBackRow - rowH
         let fieldW = w - padX - btnW - 8 - padX
         codeField.frame = NSRect(x: padX, y: rowY, width: fieldW, height: rowH)
