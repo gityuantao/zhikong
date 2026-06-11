@@ -1,5 +1,9 @@
 # 直控 ZhiKong
 
+[![CI](https://github.com/gityuantao/zhikong/actions/workflows/ci.yml/badge.svg)](https://github.com/gityuantao/zhikong/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Platform: macOS 14+](https://img.shields.io/badge/Platform-macOS%2014%2B-blue.svg)
+
 A low-latency, native macOS remote-desktop app: one Mac controls another over LAN or
 the internet, with end-to-end encryption. Built from scratch with ScreenCaptureKit,
 VideoToolbox (HEVC), and Network.framework — no third-party SDKs.
@@ -44,6 +48,14 @@ VideoToolbox (HEVC), and Network.framework — no third-party SDKs.
   AIMD controller to back off under congestion.
 - **Input passthrough** — mouse, keyboard, scroll, and Mission Control / Spaces gestures.
 - **~72 unit tests** covering crypto, framing, codecs, layout, and config parsing.
+
+## Screenshots
+
+_Coming soon._ To add: drop PNGs into [`assets/screenshots/`](assets/screenshots/) and reference them here.
+
+- `role-picker.png` — the launch role chooser (控制端 / 被控端)
+- `host.png` — Host window showing the remote code + the *"允许远程控制"* toggle
+- `session.png` — Controller viewing the remote screen
 
 ## How it works
 
