@@ -51,7 +51,7 @@ VideoToolbox (HEVC), and Network.framework — no third-party SDKs.
 - **Adaptive bitrate** (opt-in) — client reports received FPS; the Host runs a protective
   AIMD controller to back off under congestion.
 - **Input passthrough** — mouse, keyboard, scroll, and Mission Control / Spaces gestures.
-- **~72 unit tests** covering crypto, framing, codecs, layout, and config parsing.
+- **~73 unit tests** covering crypto, framing, codecs, layout, and config parsing.
 
 ## Screenshots
 
@@ -161,9 +161,11 @@ Precedence: env vars > `~/.zhikong/relay.conf` > LAN default.
   short 6-character room code — anyone who can observe the pairing handshake can then derive the
   key. The app logs a warning in this fallback mode. This is *not* real E2E security; it exists
   only as a zero-config convenience.
-- **Not yet implemented:** PAKE (so a short code is safe even against the relay operator), and a
-  per-connection confirmation prompt on the Host. Until then, the Host's *"允许远程控制"* toggle is
-  the gate — keep it off when you're not expecting a connection.
+- **Not yet implemented:** PAKE (so a short code is safe even against the relay operator), a
+  per-connection confirmation prompt on the Host, and **anti-replay** (frames carry no sequence
+  number, so an active attacker who controls the relay could record and replay old encrypted
+  frames — most sensitive on the input channel). Until then, the Host's *"允许远程控制"* toggle is
+  the gate — keep it off when you're not expecting a connection, and run your own relay.
 
 ## Project layout
 
