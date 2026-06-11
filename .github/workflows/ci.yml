@@ -14,7 +14,9 @@ concurrency:
 jobs:
   test:
     name: Build & unit tests (macOS)
-    runs-on: macos-14
+    # macos-15 ships Xcode 16, which can open the project format XcodeGen emits
+    # (Xcode 15.4 on macos-14 fails with "future Xcode project file format (77)").
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
