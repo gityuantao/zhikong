@@ -30,6 +30,10 @@ final class HostController: NSObject {
     private var statusLabel: NSTextField!
     private var enableButton: NSButton!
     private var refreshButton: NSButton!
+    private var copyHint: NSTextField!
+    private var copyHintReset: DispatchWorkItem?
+    /// 顶层 AppDelegate 注入:点「切换角色」时停掉本端、回到角色选择窗。
+    var onSwitchRole: (() -> Void)?
 
     /// 当前远控码(动态生成、**持久化**:不每次启动都换,重启沿用上次;只在点「刷新」时换)。
     private var currentRoom = ""
@@ -43,51 +47,66 @@ final class HostController: NSObject {
 
     /// 启动被控端(由顶层 AppDelegate 在选角色后调用)。
     func start() {
-        let w: CGFloat = 360, h: CGFloat = 208
+        let w: CGFloat = 340, h: CGFloat = 248
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
                           styleMask: [.titled, .closable, .miniaturizable],
                           backing: .buffered, defer: false)
         window.title = "直控 — 被控端"
+        guard let content = window.contentView else { return }
+
+        // ‹ 切换角色(左上角)
+        let back = makeLinkButton("‹ 切换角色", target: self, action: #selector(switchRoleTapped))
+        back.frame = NSRect(x: 12, y: h - 30, width: 110, height: 18)
+        content.addSubview(back)
 
         // 标题("远控码"/"局域网模式")
         captionLabel = NSTextField(labelWithString: "远控码")
         captionLabel.font = .systemFont(ofSize: 12, weight: .medium)
         captionLabel.textColor = .secondaryLabelColor
         captionLabel.alignment = .center
-        captionLabel.frame = NSRect(x: 0, y: h - 42, width: w, height: 16)
-        window.contentView?.addSubview(captionLabel)
+        captionLabel.frame = NSRect(x: 0, y: h - 70, width: w, height: 16)
+        content.addSubview(captionLabel)
 
-        // 远控码大字
+        // 远控码大字(点击复制)
         codeLabel = NSTextField(labelWithString: "—")
-        codeLabel.font = .monospacedSystemFont(ofSize: 30, weight: .bold)
+        codeLabel.font = .monospacedSystemFont(ofSize: 34, weight: .bold)
         codeLabel.alignment = .center
-        codeLabel.frame = NSRect(x: 0, y: h - 88, width: w, height: 42)
-        window.contentView?.addSubview(codeLabel)
+        codeLabel.frame = NSRect(x: 0, y: h - 118, width: w, height: 44)
+        codeLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(copyCode)))
+        content.addSubview(codeLabel)
+
+        // 复制提示 / 反馈(点击远控码即复制)
+        copyHint = NSTextField(labelWithString: "点击远控码可复制")
+        copyHint.font = .systemFont(ofSize: 11)
+        copyHint.textColor = .tertiaryLabelColor
+        copyHint.alignment = .center
+        copyHint.frame = NSRect(x: 0, y: h - 138, width: w, height: 14)
+        content.addSubview(copyHint)
 
         // 刷新远控码(旧码立即失效,更安全)
         refreshButton = NSButton(title: "↻ 刷新远控码", target: self, action: #selector(refreshCode))
         refreshButton.bezelStyle = .rounded
         refreshButton.controlSize = .small
         refreshButton.sizeToFit()
-        let rbw = max(refreshButton.frame.width, 120)
-        refreshButton.frame = NSRect(x: (w - rbw) / 2, y: h - 118, width: rbw, height: 22)
-        window.contentView?.addSubview(refreshButton)
+        let rbw = max(refreshButton.frame.width, 124)
+        refreshButton.frame = NSRect(x: (w - rbw) / 2, y: h - 170, width: rbw, height: 22)
+        content.addSubview(refreshButton)
 
         // 允许远程控制开关(居中)
         enableButton = NSButton(checkboxWithTitle: "允许远程控制", target: self, action: #selector(toggleServing(_:)))
         enableButton.state = .on
         enableButton.sizeToFit()
         let ebw = enableButton.frame.width
-        enableButton.frame = NSRect(x: (w - ebw) / 2, y: 48, width: ebw, height: 20)
-        window.contentView?.addSubview(enableButton)
+        enableButton.frame = NSRect(x: (w - ebw) / 2, y: 52, width: ebw, height: 20)
+        content.addSubview(enableButton)
 
         // 连接状态(小字,居中)
         statusLabel = NSTextField(labelWithString: "○ 等待连接")
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.alignment = .center
-        statusLabel.frame = NSRect(x: 0, y: 16, width: w, height: 18)
-        window.contentView?.addSubview(statusLabel)
+        statusLabel.frame = NSRect(x: 0, y: 20, width: w, height: 18)
+        content.addSubview(statusLabel)
 
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -175,6 +194,7 @@ final class HostController: NSObject {
             codeLabel.font = .systemFont(ofSize: 17, weight: .medium)
             codeLabel.stringValue = "控制端自动发现"
             refreshButton.isHidden = true   // 局域网无远控码,藏刷新
+            copyHint.isHidden = true        // 无码可复制
         }
         applyServing()   // 按开关(默认开)启动服务
 
@@ -220,6 +240,29 @@ final class HostController: NSObject {
     var staysResidentOnWindowClose: Bool { true }
     /// 点 Dock 图标(窗口被关掉后)重新唤出小窗口。
     func showWindow() { window.makeKeyAndOrderFront(nil) }
+
+    /// 点「切换角色」:收起本窗口,请求顶层回到角色选择(AppDelegate 负责 stop 本端)。
+    @objc private func switchRoleTapped() {
+        window.orderOut(nil)
+        onSwitchRole?()
+    }
+
+    /// 点远控码 → 复制到剪贴板,并短暂反馈。
+    @objc private func copyCode() {
+        guard relayConfig != nil, !currentRoom.isEmpty else { return }   // 局域网无码
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(currentRoom, forType: .string)
+        copyHint.stringValue = "✓ 已复制到剪贴板"
+        copyHint.textColor = .systemGreen
+        copyHintReset?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.copyHint.stringValue = "点击远控码可复制"
+            self?.copyHint.textColor = .tertiaryLabelColor
+        }
+        copyHintReset = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: work)
+    }
 
     // MARK: - 被控开关 / 状态
 

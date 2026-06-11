@@ -13,6 +13,9 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var codeField: NSTextField!
     private var connectButton: NSButton!
     private var connectStatus: NSTextField!
+    private var backButton: NSButton!
+    /// 顶层 AppDelegate 注入:点「切换角色」时停掉本端、回到角色选择窗。
+    var onSwitchRole: (() -> Void)?
     // 会话窗口(大)
     private var sessionWindow: NSWindow!
     private var controlView: RemoteControlView!
@@ -60,7 +63,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         // 手势诊断模式:只跑被动探针,不连、不弹会话窗口。
         if ProcessInfo.processInfo.environment["ZHIKONG_GESTURE_PROBE"] == "1" {
             _ = keyCapture.ensureAccessibility()
-            connectStatus.stringValue = "🔬 手势诊断模式 — 按终端提示做动作,日志发回"
+            setConnectStatus("🔬 手势诊断模式 — 按终端提示做动作,日志发回")
             connectWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             GestureProbe.start()
@@ -80,43 +83,93 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // MARK: - 窗口构建
 
     private func buildConnectWindow() {
-        let w: CGFloat = 380, h: CGFloat = 252
-        connectWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+        connectWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 130),
                                  styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         connectWindow.title = "直控 — 连接"
         connectWindow.isReleasedWhenClosed = false
+        guard let content = connectWindow.contentView else { return }
 
-        captionLabel = NSTextField(labelWithString: "远控码")
-        captionLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        captionLabel.textColor = .secondaryLabelColor
-        captionLabel.alignment = .center
-        captionLabel.frame = NSRect(x: 0, y: h - 46, width: w, height: 16)
-        connectWindow.contentView?.addSubview(captionLabel)
+        // ‹ 切换角色(左上角)
+        backButton = makeLinkButton("‹ 切换角色", target: self, action: #selector(switchRoleTapped))
+        content.addSubview(backButton)
 
+        // 一行:远控码输入框(左)+「连接」按钮(右)
         codeField = NSTextField(string: "")
-        codeField.placeholderString = "输入被控端显示的远控码"
-        codeField.font = .monospacedSystemFont(ofSize: 18, weight: .bold)
+        codeField.placeholderString = "远控码"
+        codeField.font = .monospacedSystemFont(ofSize: 16, weight: .bold)
         codeField.alignment = .center
-        codeField.frame = NSRect(x: 40, y: h - 88, width: w - 80, height: 30)
         codeField.delegate = self   // 回车连接靠 delegate(只在真按回车时触发,不会启动时自动连)
-        connectWindow.contentView?.addSubview(codeField)
+        content.addSubview(codeField)
 
         connectButton = NSButton(title: "连接", target: self, action: #selector(connectTapped))
         connectButton.bezelStyle = .rounded
-        connectButton.frame = NSRect(x: (w - 120) / 2, y: h - 130, width: 120, height: 30)
-        connectWindow.contentView?.addSubview(connectButton)
+        content.addSubview(connectButton)
 
-        // 多行自动换行:失败原因(被控端不在线/连不上中转等)可能较长,需完整显示不截断。
+        // 输入说明(放在输入框下方)
+        captionLabel = NSTextField(labelWithString: "输入被控端的远控码")
+        captionLabel.font = .systemFont(ofSize: 11)
+        captionLabel.textColor = .secondaryLabelColor
+        captionLabel.alignment = .left
+        content.addSubview(captionLabel)
+
+        // 状态/提示:多行自动换行,**仅在有内容时撑高窗口**(无内容时窗口保持紧凑)。
         connectStatus = NSTextField(wrappingLabelWithString: "")
         connectStatus.font = .systemFont(ofSize: 11)
         connectStatus.textColor = .secondaryLabelColor
-        connectStatus.alignment = .center
+        connectStatus.alignment = .left
         connectStatus.isEditable = false
         connectStatus.isSelectable = false
         connectStatus.maximumNumberOfLines = 0
         connectStatus.lineBreakMode = .byWordWrapping
-        connectStatus.frame = NSRect(x: 14, y: 12, width: w - 28, height: 96)
-        connectWindow.contentView?.addSubview(connectStatus)
+        content.addSubview(connectStatus)
+
+        relayoutConnect(statusHeight: 0)   // 初始紧凑布局
+    }
+
+    /// 紧凑布局:无提示时窗口最小;有提示(statusHeight>0)按需撑高。重排时保持窗口**顶边不动**(向下生长)。
+    private func relayoutConnect(statusHeight: CGFloat) {
+        let w: CGFloat = 360, padX: CGFloat = 20, btnW: CGFloat = 76
+        let backH: CGFloat = 18, rowH: CGFloat = 28, capH: CGFloat = 14
+        let topPad: CGFloat = 12, gapBackRow: CGFloat = 12, gapRowCap: CGFloat = 6
+        let gapCapStatus: CGFloat = statusHeight > 0 ? 9 : 0
+        let bottomPad: CGFloat = 16
+        let contentH = topPad + backH + gapBackRow + rowH + gapRowCap + capH + gapCapStatus + statusHeight + bottomPad
+
+        let topY = connectWindow.frame.maxY                 // 保持顶边不动
+        connectWindow.setContentSize(NSSize(width: w, height: contentH))
+        connectWindow.setFrameOrigin(NSPoint(x: connectWindow.frame.origin.x, y: topY - connectWindow.frame.height))
+
+        let backY = contentH - topPad - backH
+        backButton.frame = NSRect(x: 12, y: backY, width: 110, height: backH)
+        let rowY = backY - gapBackRow - rowH
+        let fieldW = w - padX - btnW - 8 - padX
+        codeField.frame = NSRect(x: padX, y: rowY, width: fieldW, height: rowH)
+        connectButton.frame = NSRect(x: w - padX - btnW, y: rowY, width: btnW, height: rowH)
+        let capY = rowY - gapRowCap - capH
+        captionLabel.frame = NSRect(x: padX, y: capY, width: fieldW, height: capH)
+        connectStatus.frame = NSRect(x: padX, y: capY - gapCapStatus - statusHeight, width: w - padX - padX, height: statusHeight)
+    }
+
+    /// 设状态文案并按内容高度撑高/收起窗口(空串=收起到紧凑)。所有状态展示统一走这里。
+    private func setConnectStatus(_ text: String, color: NSColor = .secondaryLabelColor) {
+        connectStatus.stringValue = text
+        connectStatus.textColor = color
+        var h: CGFloat = 0
+        if !text.isEmpty {
+            let rect = (text as NSString).boundingRect(
+                with: NSSize(width: CGFloat(320), height: CGFloat.greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: NSFont.systemFont(ofSize: 11)])
+            h = ceil(rect.height) + 2
+        }
+        relayoutConnect(statusHeight: h)
+    }
+
+    /// 点「切换角色」:收起本端窗口,请求顶层回到角色选择(AppDelegate 负责 stop 本端)。
+    @objc private func switchRoleTapped() {
+        connectWindow.orderOut(nil)
+        sessionWindow.orderOut(nil)
+        onSwitchRole?()
     }
 
     private func buildSessionWindow() {
@@ -176,8 +229,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         controlView.clear()
         connectButton.isEnabled = true       // 连接中保持可点 → 充当「取消」
         connectButton.title = "取消"
-        connectStatus.textColor = .secondaryLabelColor
-        connectStatus.stringValue = relayConfigBase != nil ? "正在连接…" : "正在搜索局域网被控 Mac…"
+        setConnectStatus(relayConfigBase != nil ? "正在连接…" : "正在搜索局域网被控 Mac…")
         connectTimeoutTimer?.invalidate()
         connectTimeoutTimer = Timer.scheduledTimer(withTimeInterval: ClientController.connectTimeout, repeats: false) { [weak self] _ in
             self?.connectTimedOut()
@@ -203,8 +255,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         conn.stop()
         feedbackTimer?.invalidate(); feedbackTimer = nil
         endConnecting()
-        connectStatus.textColor = .secondaryLabelColor
-        connectStatus.stringValue = "已取消"
+        setConnectStatus("已取消")
     }
 
     /// 连接失败:停连接、复位按钮、红字报错(留在小窗,不开会话窗)。
@@ -216,8 +267,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     private func showConnectError(_ text: String) {
-        connectStatus.textColor = .systemRed
-        connectStatus.stringValue = text
+        setConnectStatus(text, color: .systemRed)
     }
 
     /// 退出"连接中"状态(成功开会话或失败都调):复位按钮、停超时计时。
@@ -294,8 +344,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         // 用退出会话前的状态给连接窗口一个有意义的提示(被控端是否在线),而非笼统的"已断开"。
         let lastStatus = firstFrameReceived ? "" : (peerOnline ? "被控端在线但未收到画面(检查屏幕录制/口令)" : "被控端不在线")
         teardownSession()
-        connectStatus.textColor = .secondaryLabelColor
-        connectStatus.stringValue = lastStatus
+        setConnectStatus(lastStatus)
         connectWindow.makeKeyAndOrderFront(nil)
         connectWindow.makeFirstResponder(codeField)
     }
@@ -305,8 +354,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func leaveSession(reason: String) {
         teardownSession()
         sessionWindow.orderOut(nil)
-        connectStatus.textColor = .systemOrange
-        connectStatus.stringValue = reason
+        setConnectStatus(reason, color: .systemOrange)
         connectWindow.makeKeyAndOrderFront(nil)
         connectWindow.makeFirstResponder(codeField)
         NSApp.activate(ignoringOtherApps: true)
@@ -338,7 +386,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     private func setupConnectionCallbacks() {
         conn.onStateChange = { [weak self] text in
-            DispatchQueue.main.async { self?.connectStatus.stringValue = text }
+            DispatchQueue.main.async { self?.setConnectStatus(text) }
         }
         // 中转报来被控端在线状态。驱动三件事:
         //  ① 连接中 + 在线 → 打开会话窗(正向信号);② 连接中 + 不在线 → 留在小窗等待;
@@ -354,7 +402,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                     self.updateSessionOverlay()
                 } else {
                     if self.connecting {
-                        self.connectStatus.stringValue = "被控端暂未在线,等待对方开启…"
+                        self.setConnectStatus("被控端暂未在线,等待对方开启…")
                     } else if self.sessionWindow.isVisible {
                         self.firstFrameReceived = false
                         self.controlView.clear()           // 不残留冻结画面
@@ -414,7 +462,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         // 系统键盘 / 手势捕获(仅会话窗口聚焦时消费转发)。
         accessibilityTrusted = keyCapture.ensureAccessibility()
         if !accessibilityTrusted {
-            connectStatus.stringValue = "提示:键盘快捷键透传需在 系统设置›隐私›辅助功能 授权后重启"
+            setConnectStatus("提示:键盘快捷键透传需在 系统设置›隐私›辅助功能 授权后重启")
         }
         keyCapture.shouldCapture = { [weak self] in self?.isRemoteActive ?? false }
         keyCapture.onKey = { [weak self] event in self?.conn.send(event) }
@@ -439,11 +487,11 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             codeField.stringValue = relay.room.isEmpty ? lastUsed : relay.room
         } else {
             relayConfigBase = nil
-            captionLabel.stringValue = "局域网模式"
+            captionLabel.stringValue = "局域网模式 · 无需远控码"
             codeField.stringValue = ""
-            codeField.placeholderString = "局域网自动发现,无需远控码"
+            codeField.placeholderString = "—"
             codeField.isEnabled = false
-            connectStatus.stringValue = "点「连接」自动发现同网被控 Mac"
+            setConnectStatus("点「连接」自动发现同网被控 Mac")
         }
     }
 

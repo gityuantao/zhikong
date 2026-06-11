@@ -20,25 +20,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 角色选择
 
     private func showRolePicker() {
-        let w: CGFloat = 420, h: CGFloat = 230
-        roleWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
-                              styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        roleWindow.title = "直控"
-        roleWindow.isReleasedWhenClosed = false
+        if roleWindow == nil {
+            let w: CGFloat = 420, h: CGFloat = 230
+            roleWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+                                  styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            roleWindow.title = "直控"
+            roleWindow.isReleasedWhenClosed = false
 
-        let title = NSTextField(labelWithString: "这台 Mac 当作")
-        title.font = .systemFont(ofSize: 16, weight: .semibold)
-        title.alignment = .center
-        title.frame = NSRect(x: 0, y: h - 52, width: w, height: 24)
-        roleWindow.contentView?.addSubview(title)
+            let title = NSTextField(labelWithString: "这台 Mac 当作")
+            title.font = .systemFont(ofSize: 16, weight: .semibold)
+            title.alignment = .center
+            title.frame = NSRect(x: 0, y: h - 52, width: w, height: 24)
+            roleWindow.contentView?.addSubview(title)
 
-        let clientBtn = makeRoleButton("控制端", "远程控制别的 Mac", #selector(pickClient), y: h - 132)
-        roleWindow.contentView?.addSubview(clientBtn)
-        let hostBtn = makeRoleButton("被控端", "把这台屏幕分享出去、被远程控制", #selector(pickHost), y: 28)
-        roleWindow.contentView?.addSubview(hostBtn)
-
+            let clientBtn = makeRoleButton("控制端", "远程控制别的 Mac", #selector(pickClient), y: h - 132)
+            roleWindow.contentView?.addSubview(clientBtn)
+            let hostBtn = makeRoleButton("被控端", "把这台屏幕分享出去、被远程控制", #selector(pickHost), y: 28)
+            roleWindow.contentView?.addSubview(hostBtn)
+        }
         roleWindow.center()
         roleWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func makeRoleButton(_ name: String, _ subtitle: String, _ action: Selector, y: CGFloat) -> NSButton {
@@ -59,11 +61,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startClient() {
         roleWindow?.orderOut(nil)
-        let c = ClientController(); client = c; c.start()
+        let c = ClientController(); client = c
+        c.onSwitchRole = { [weak self] in self?.switchRole() }
+        c.start()
     }
     private func startHost() {
         roleWindow?.orderOut(nil)
-        let hc = HostController(); host = hc; hc.start()
+        let hc = HostController(); host = hc
+        hc.onSwitchRole = { [weak self] in self?.switchRole() }
+        hc.start()
+    }
+
+    /// 从当前角色返回选择窗:停掉并释放当前角色,重新展示角色选择(控制器已先 orderOut 自己的窗口)。
+    private func switchRole() {
+        host?.stop(); host = nil
+        client?.stop(); client = nil
+        showRolePicker()
     }
 
     // MARK: - 生命周期(按所选角色分派)
