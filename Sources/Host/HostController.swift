@@ -44,6 +44,17 @@ final class HostController: NSObject {
     /// 是否允许被远程控制(开关)。关 → 停止服务,中转上无 Host 在场,连不上。
     private var serving = true
     private var clientConnected = false
+    /// 「对端在场」镜像(= serving && clientConnected),供捕获/编码回调线程读 ——
+    /// 无人观看时跳过 HEVC/AAC 编码(发送端反正会丢),常驻被控端不再空耗 CPU/电。
+    /// 主线程写(refreshStatus)、捕获线程读,锁保护。
+    private let peerActiveLock = NSLock()
+    private var _peerActive = false
+    private var isPeerActive: Bool {
+        peerActiveLock.lock(); defer { peerActiveLock.unlock() }; return _peerActive
+    }
+    private func setPeerActive(_ v: Bool) {
+        peerActiveLock.lock(); _peerActive = v; peerActiveLock.unlock()
+    }
 
     /// 启动被控端(由顶层 AppDelegate 在选角色后调用)。
     func start() {
@@ -201,22 +212,26 @@ final class HostController: NSObject {
         }
         applyServing()   // 按开关(默认开)启动服务
 
-        // 编码侧:NV12 像素缓冲 → HEVC → VideoFramePacket → 推送。回调在 VideoToolbox 线程。
+        // 编码侧:NV12 像素缓冲 → HEVC → VideoFramePacket → 推送。回调在捕获队列。
+        // 无人观看(isPeerActive=false)时直接跳过编码——发送端本来就会丢,编了纯属白耗 CPU。
+        // 控制端一连上,常规帧/静止重发(≤0.5s,强制关键帧)立即恢复出画面。
         capture.onSampleBuffer = { [weak self] sampleBuffer in
-            guard let self, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            guard let self, self.isPeerActive,
+                  let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
             self.encoder.encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         }
         // 屏幕静止时低频重发最后一帧(强制关键帧):静止画面/新连入也能立刻看到,不必等用户去动一下。
         // 与 onSampleBuffer 同在捕获队列上串行调用,编码 PTS 仍单调(host 时钟)。
         capture.onIdleResend = { [weak self] pb, pts in
-            self?.encoder.encode(pb, pts: pts, forceKeyframe: true)
+            guard let self, self.isPeerActive else { return }
+            self.encoder.encode(pb, pts: pts, forceKeyframe: true)
         }
         capture.onError = { error in NSLog("[直控] 捕获错误: \(error)") }
 
         // 音频侧:系统音频帧 → (AAC/PCM)AudioPacket → 经同一连接推给 Client(回调在捕获音频队列,线程安全)。
-        // 一帧经 AAC 编码可能产出 0..N 个包(每包 1024 样本),逐个发送。
+        // 一帧经 AAC 编码可能产出 0..N 个包(每包 1024 样本),逐个发送。无人观看时同样跳过。
         capture.onAudioSampleBuffer = { [weak self] sampleBuffer in
-            guard let self else { return }
+            guard let self, self.isPeerActive else { return }
             for packet in self.audioPacker.pack(sampleBuffer) { self.server.send(packet) }
         }
 
@@ -320,6 +335,8 @@ final class HostController: NSObject {
     }
 
     private func refreshStatus() {
+        // 同步「对端在场」镜像给捕获/编码线程(所有 serving/clientConnected 变化都经过这里)。
+        setPeerActive(serving && clientConnected)
         if !serving {
             statusLabel.stringValue = "⊘ 已关闭"
             statusLabel.textColor = .secondaryLabelColor
