@@ -13,12 +13,26 @@ final class HEVCEncoder {
     /// 关键帧最大间隔(帧)。外网调小(如 30)→ 丢帧/新连入后更快恢复(代价是码率占用略升)。
     var maxKeyFrameInterval: Int = 120
 
+    /// 会话与其尺寸。encode 在捕获队列、stop/updateBitRate 可能在主线程 → 用锁保护属性存取
+    /// (拿到的 session 引用因 ARC retain 不会 UAF;已失效会话上的 VT 调用只会返回错误码,不崩)。
+    private let sessionLock = NSLock()
     private var session: VTCompressionSession?
+    private var sessionWidth = 0
+    private var sessionHeight = 0
 
     func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, forceKeyframe: Bool = false) {
-        if session == nil {
-            setup(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+        let w = CVPixelBufferGetWidth(pixelBuffer), h = CVPixelBufferGetHeight(pixelBuffer)
+        sessionLock.lock()
+        // 分辨率变化(如被控机改了显示器分辨率)→ 旧会话尺寸不符,重建。
+        if let s = session, sessionWidth != w || sessionHeight != h {
+            VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid)
+            VTCompressionSessionInvalidate(s)
+            session = nil
+            NSLog("[直控] 输入尺寸变化 %dx%d → %dx%d,重建编码器", sessionWidth, sessionHeight, w, h)
         }
+        if session == nil { setup(width: w, height: h) }
+        let session = self.session
+        sessionLock.unlock()
         guard let session else { return }
         // 静止重发时强制关键帧:新连入的控制端无需等下一个关键帧即可解出画面。
         let frameProps: CFDictionary? = forceKeyframe
@@ -33,15 +47,21 @@ final class HEVCEncoder {
     }
 
     func stop() {
-        guard let session else { return }
-        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
-        VTCompressionSessionInvalidate(session)
-        self.session = nil
+        sessionLock.lock()
+        let s = session
+        session = nil
+        sessionLock.unlock()
+        guard let s else { return }
+        VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid)
+        VTCompressionSessionInvalidate(s)
     }
 
     /// 在**活动会话上**动态改码率(自适应码率用,无需重建会话)。线程安全(VTSessionSetProperty)。
     func updateBitRate(_ bps: Int) {
+        sessionLock.lock()
         bitRate = bps
+        let session = self.session
+        sessionLock.unlock()
         guard let session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
         let cap = bps + bps / 2
@@ -49,6 +69,7 @@ final class HEVCEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
     }
 
+    /// 仅在持有 `sessionLock` 时调用(由 encode 调)。
     private func setup(width: Int, height: Int) {
         var s: VTCompressionSession?
         // 低延迟码控(EnableLowLatencyRateControl):苹果为实时/会议场景设计,
@@ -80,6 +101,8 @@ final class HEVCEncoder {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel)
         VTCompressionSessionPrepareToEncodeFrames(s)
         session = s
+        sessionWidth = width
+        sessionHeight = height
         NSLog("[直控] 编码器就绪 %dx%d 低延迟码控", width, height)
     }
 
@@ -90,8 +113,22 @@ final class HEVCEncoder {
         guard CMBlockBufferGetDataPointer(
             block, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset,
             totalLengthOut: &totalLength, dataPointerOut: &dataPtr) == noErr,
-            let dataPtr else { return }
-        let nalData = Data(bytes: dataPtr, count: totalLength)
+            let dataPtr, totalLength > 0 else { return }
+        // CMBlockBuffer 可能由多段不连续内存组成:dataPtr 只保证 lengthAtOffset 字节连续。
+        // 直接按 totalLength 读会越界 → 仅在整块连续时走零拷贝指针,否则逐段拷出。
+        let nalData: Data
+        if lengthAtOffset == totalLength {
+            nalData = Data(bytes: dataPtr, count: totalLength)
+        } else {
+            var copied = Data(count: totalLength)
+            let ok = copied.withUnsafeMutableBytes { raw -> Bool in
+                guard let base = raw.baseAddress else { return false }
+                return CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: totalLength,
+                                                  destination: base) == kCMBlockBufferNoErr
+            }
+            guard ok else { return }
+            nalData = copied
+        }
 
         let notSync = (CMSampleBufferGetSampleAttachmentsArray(sbuf, createIfNecessary: false) as? [[CFString: Any]])?
             .first?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
