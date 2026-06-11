@@ -78,7 +78,9 @@ final class ScreenCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stop() {
         idleTimer?.cancel(); idleTimer = nil
-        lastImageBuffer = nil
+        // lastImageBuffer 由捕获队列读写(帧回调/重发定时器都在 sampleQueue)——
+        // 在同队列上清空,避免与正在投递的帧回调跨线程竞争 ARC。
+        sampleQueue.async { [weak self] in self?.lastImageBuffer = nil }
         stream?.stopCapture { _ in }
         stream = nil
     }
