@@ -23,6 +23,7 @@ final class ClipboardSync {
     func start() {
         guard timer == nil else { return }
         let t = Timer(timeInterval: 0.5, target: self, selector: #selector(poll), userInfo: nil, repeats: true)
+        t.tolerance = 0.1   // 轮询无需精确节拍,给系统合并定时器的余地(省电)
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
