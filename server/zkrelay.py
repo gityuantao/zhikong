@@ -85,7 +85,6 @@ async def handle(reader, writer):
     #    按帧边界转发,则任何时刻加入的对端都从帧边界对齐。无对端时整帧丢弃(实时流)。
     buf = bytearray()
     MAX_FRAME = 16 * 1024 * 1024  # 安全上限,防错位/垃圾长度撑爆内存
-    fwd = drop = noeer = 0        # 诊断计数:已转发 / 慢链路丢弃 / 无对端丢弃
     try:
         while True:
             data = await reader.read(CHUNK)
@@ -103,22 +102,16 @@ async def handle(reader, writer):
                 frame = bytes(buf[0:total])
                 del buf[0:total]
                 dst = peers.get(room, {}).get(other)
-                if dst is None:
-                    noeer += 1
-                elif role == "HOST":
-                    # 视频向(Host→Client):慢链路丢帧不阻塞;写缓冲未堆积才发,堆了就丢本帧。
-                    tr = dst.transport
-                    if tr is None or tr.get_write_buffer_size() < DROP_THRESHOLD:
-                        dst.write(frame); fwd += 1
+                if dst is not None:
+                    if role == "HOST":
+                        # 视频向(Host→Client):慢链路丢帧不阻塞;写缓冲未堆积才发,堆了就丢本帧。
+                        tr = dst.transport
+                        if tr is None or tr.get_write_buffer_size() < DROP_THRESHOLD:
+                            dst.write(frame)
                     else:
-                        drop += 1
-                else:
-                    # 输入向(Client→Host):低频且不可丢,正常写+背压。
-                    dst.write(frame); fwd += 1
-                    await dst.drain()
-                if (fwd + drop + noeer) % 120 == 1:
-                    log.info("%s room=%s 帧统计: 转发=%d 慢丢=%d 无对端=%d (本帧%dB)",
-                             role, room, fwd, drop, noeer, total)
+                        # 输入向(Client→Host):低频且不可丢,正常写+背压。
+                        dst.write(frame)
+                        await dst.drain()
     except (ConnectionError, asyncio.CancelledError):
         pass
     finally:
