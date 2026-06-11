@@ -19,8 +19,9 @@ final class HostServer {
     /// 中转告知对端(控制端)是否在线(在内部串行队列上)。仅外网中转模式有。
     var onPeerPresence: ((Bool) -> Void)?
 
+    /// 以下可变状态(listener/framer/relayConfig)**只在内部串行队列上**读写:
+    /// start/startRelay/stop 把自己的工作体 async 到 queue,与 NWConnection 回调天然互斥。
     private var listener: NWListener?
-    private var connection: NWConnection?
     /// 反向通道(Client→Host 输入流)的解帧器。每条新连接重置一个,
     /// 避免旧连接残留的半包污染新连接。
     private var framer = StreamFramer()
@@ -28,7 +29,7 @@ final class HostServer {
     /// 端到端加密信道(仅外网/中转模式启用;局域网为 nil 走明文)。Host 发 H2C、收 C2H。
     /// 无状态(每帧随机 nonce),重连无需重置;`stop()` 时清空。
     ///
-    /// **跨线程**:写在主线程(startRelay/stop),读在多处不同线程(receiveInput 在内部队列、
+    /// **跨线程**:写在内部队列(startRelay/stop),读在多处不同线程(receiveInput 在内部队列、
     /// sendFramed 在编码/音频回调线程)。用锁保护读写,且 getter 在持锁期间已对返回值完成 ARC retain,
     /// 故即便另一线程同时置 nil/释放也不会 use-after-free。SecureChannel 内容不可变,持有副本调用安全。
     private let channelLock = NSLock()
@@ -37,40 +38,54 @@ final class HostServer {
         get { channelLock.lock(); defer { channelLock.unlock() }; return _channel }
         set { channelLock.lock(); _channel = newValue; channelLock.unlock() }
     }
+    /// 当前连接。与 `channel` 同理加锁:写在内部队列,读还来自编码/音频回调线程(sendFramed)。
+    /// 之前无保护的跨线程读写存在 ARC 竞态(读线程取引用恰逢写线程释放 → UAF),与 channel 同方案修复。
+    private let connLock = NSLock()
+    private var _connection: NWConnection?
+    private var connection: NWConnection? {
+        get { connLock.lock(); defer { connLock.unlock() }; return _connection }
+        set { connLock.lock(); _connection = newValue; connLock.unlock() }
+    }
 
-    /// 启动监听并开始 Bonjour 广播。
+    /// 启动监听并开始 Bonjour 广播。线程安全:工作体在内部队列执行。
     func start(serviceName: String = "ZhiKong-Studio") {
-        let tcpOptions = NWProtocolTCP.Options()
-        tcpOptions.noDelay = true   // 关闭 Nagle:小包立即发,避免实时视频流"攒包→突发"的顿挫
-        let params = NWParameters(tls: nil, tcp: tcpOptions)
-        guard let listener = try? NWListener(using: params) else {
-            NSLog("[直控] HostServer 启动失败:无法创建 NWListener")
-            return
-        }
-        listener.service = NWListener.Service(name: serviceName, type: "_zhikong._tcp")
-        listener.newConnectionHandler = { [weak self] conn in
+        queue.async { [weak self] in
             guard let self else { return }
-            // 单连接策略:新连接取代旧连接。重置反向通道解帧器(新连接的字节流从头算)。
-            self.connection?.cancel()
-            self.connection = conn
-            self.framer = StreamFramer()
-            conn.stateUpdateHandler = { [weak self] state in
-                guard let self else { return }
-                switch state {
-                case .ready:
-                    self.onClientConnected?()
-                    // 连接就绪后启动反向接收循环:收 Client 的输入事件。
-                    self.receiveInput()
-                case .failed, .cancelled:
-                    self.onClientDisconnected?()
-                default:
-                    break
-                }
+            let tcpOptions = NWProtocolTCP.Options()
+            tcpOptions.noDelay = true   // 关闭 Nagle:小包立即发,避免实时视频流"攒包→突发"的顿挫
+            let params = NWParameters(tls: nil, tcp: tcpOptions)
+            guard let listener = try? NWListener(using: params) else {
+                NSLog("[直控] HostServer 启动失败:无法创建 NWListener")
+                return
             }
-            conn.start(queue: self.queue)
+            listener.service = NWListener.Service(name: serviceName, type: "_zhikong._tcp")
+            listener.newConnectionHandler = { [weak self] conn in
+                guard let self else { return }
+                // 单连接策略:新连接取代旧连接。重置反向通道解帧器(新连接的字节流从头算)。
+                self.connection?.cancel()
+                self.connection = conn
+                self.framer = StreamFramer()
+                conn.stateUpdateHandler = { [weak self] state in
+                    guard let self else { return }
+                    // 仅当回调对应的仍是当前连接才处理:被新连接顶替的旧连接,其迟到的
+                    // .cancelled 不能把"新客户端已连接"误报成断开(.ready 同理防御)。
+                    guard conn === self.connection else { return }
+                    switch state {
+                    case .ready:
+                        self.onClientConnected?()
+                        // 连接就绪后启动反向接收循环:收 Client 的输入事件。
+                        self.receiveInput()
+                    case .failed, .cancelled:
+                        self.onClientDisconnected?()
+                    default:
+                        break
+                    }
+                }
+                conn.start(queue: self.queue)
+            }
+            listener.start(queue: self.queue)
+            self.listener = listener
         }
-        listener.start(queue: queue)
-        self.listener = listener
     }
 
     // MARK: - 外网模式(出站连中转,替代 NWListener+Bonjour)
@@ -79,13 +94,17 @@ final class HostServer {
 
     /// 外网模式:出站连中转。复用同一 `connection` 的收发逻辑(send/receiveInput 不变)。
     /// 连上后先发握手声明 HOST+房间,中转据此与 Client 配对,之后字节流原样穿过。
+    /// 线程安全:工作体在内部队列执行(与 stop/回调串行,启停顺序由队列保序)。
     func startRelay(_ config: RelayConfig) {
-        // 幂等:先断掉可能存在的旧连接,避免重复 startRelay 留下孤儿连接 + 新旧 channel 并存。
-        connection?.cancel()
-        relayConfig = config
-        // 外网链路端到端加密:Host 发视频/音频(H2C)、收输入(C2H)。
-        channel = SecureChannel(secret: config.effectiveSecret, sending: .hostToClient)
-        connectToRelay()
+        queue.async { [weak self] in
+            guard let self else { return }
+            // 幂等:先断掉可能存在的旧连接,避免重复 startRelay 留下孤儿连接 + 新旧 channel 并存。
+            self.connection?.cancel()
+            self.relayConfig = config
+            // 外网链路端到端加密:Host 发视频/音频(H2C)、收输入(C2H)。
+            self.channel = SecureChannel(secret: config.effectiveSecret, sending: .hostToClient)
+            self.connectToRelay()
+        }
     }
 
     private func connectToRelay() {
@@ -105,13 +124,14 @@ final class HostServer {
                 self.onClientConnected?()
                 self.receiveInput()
             case .failed, .cancelled:
+                // 仅当仍是当前连接(未被 stop/新一轮 startRelay 顶替)才回调与重连。
+                guard conn === self.connection else { return }
+                self.connection = nil
                 self.onClientDisconnected?()
-                // 外网易断:2 秒后重连(仅当仍是当前连接且未 stop)。
-                if conn === self.connection {
-                    self.queue.asyncAfter(deadline: .now() + 2) { [weak self] in
-                        guard let self, self.relayConfig != nil else { return }
-                        self.connectToRelay()
-                    }
+                // 外网易断:2 秒后重连(仅当未 stop、且没有新连接顶上来)。
+                self.queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    guard let self, self.relayConfig != nil, self.connection == nil else { return }
+                    self.connectToRelay()
                 }
             default:
                 break
@@ -184,20 +204,33 @@ final class HostServer {
                     }
                 }
             }
+            // 解帧器中毒(对端/中转宣告异常帧长,流已无法重对齐)→ 断开;重连会换新 framer。
+            if self.framer.poisoned {
+                NSLog("[直控] 反向流帧长异常,断开连接")
+                conn?.cancel()
+                return
+            }
             if error == nil && !isComplete {
                 self.receiveInput() // 继续递归收下一块。
+            } else {
+                // 出错或对端半关(EOF):统一 cancel,让 stateUpdateHandler(.cancelled)做
+                // 断开回调与(外网)重连调度。若只停止递归,半关连接可能停留在 .ready,
+                // 永远等不来 .failed → 外网模式不会自动重连。
+                conn?.cancel()
             }
-            // 连接结束/出错的状态处理交给 stateUpdateHandler(.failed/.cancelled),此处不重复回调。
         }
     }
 
-    /// 停止监听并断开连接。
+    /// 停止监听并断开连接。线程安全:工作体在内部队列执行。
+    /// 刻意**强捕获 self**:上层 stop 后可能立刻释放本对象,弱捕获会跳过清理块 → 连接/监听泄漏。
     func stop() {
-        relayConfig = nil   // 停止外网重连循环
-        channel = nil
-        connection?.cancel()
-        listener?.cancel()
-        connection = nil
-        listener = nil
+        queue.async {
+            self.relayConfig = nil   // 停止外网重连循环
+            self.channel = nil
+            self.connection?.cancel()
+            self.listener?.cancel()
+            self.connection = nil
+            self.listener = nil
+        }
     }
 }

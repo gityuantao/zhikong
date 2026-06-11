@@ -23,9 +23,12 @@ import Foundation
 /// 独立口令(两端各自本地配置一致)。未配独立口令时退化为房间码派生(`RelayConfig.usesFallbackSecret`),
 /// 仅用于不破坏既有可用性,会在启动时告警。
 ///
-/// **线程安全**:`final class` + 全 `let` 不可变。它由一个线程(主线程 startRelay)赋值给
-/// `channel` 属性、另一个线程(NWConnection 内部队列的收发回调)读取并调 seal/open。引用类型 +
-/// 内容不可变 ⇒ 跨线程共享同一实例安全,且属性的赋值/读取是单字长指针存取(struct 会被撕裂)。
+/// **线程安全**:`final class` + 全 `let` 不可变。它在连接内部队列(startRelay/reconnect)赋值给
+/// `channel` 属性、在其它线程(发送路径/收发回调)读取并调 seal/open。引用类型 +
+/// 内容不可变 ⇒ 跨线程共享同一实例安全(属性本身的跨线程存取由持有方加锁,见 HostServer/ClientConnection)。
+///
+/// **已知边界(roadmap)**:帧内无序号/时间戳 ⇒ 不防**重放**——能观察密文的主动攻击者(如被攻陷的中转)
+/// 可录制并回放旧帧(对输入向尤其敏感)。家用自建中转威胁可控;连同 PAKE 一起列入后续硬化。
 final class SecureChannel {
     enum Direction { case hostToClient, clientToHost }
 

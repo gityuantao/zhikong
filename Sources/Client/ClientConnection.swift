@@ -20,15 +20,16 @@ final class ClientConnection {
     /// 连接断开/失败时回调(内部串行队列)。供上层清理(如清空音频播放队列)。
     var onDisconnect: (() -> Void)?
 
+    /// 以下可变状态(browser/framer/relayConfig)**只在内部串行队列上**读写:
+    /// start/reconnect/stop 把工作体 async 到 queue,与 NWConnection/NWBrowser 回调天然互斥。
     private var browser: NWBrowser?
-    private var connection: NWConnection?
     private var framer = StreamFramer()
     private let queue = DispatchQueue(label: "com.zhikong.client.conn")
     private var relayConfig: RelayConfig?
     /// 端到端加密信道(仅外网/中转模式启用;局域网为 nil 走明文)。Client 发 C2H、收 H2C。
     /// 无状态(每帧随机 nonce),重连无需重置;`stop()` 时清空。
     ///
-    /// **跨线程**:写在内部队列(startRelay/reconnect/stop)、读在内部队列(receive)与主线程(send,
+    /// **跨线程**:写在内部队列(reconnect/stop)、读在内部队列(receive)与主线程(send,
     /// 由 controlView.onInput 调)。用锁保护;getter 持锁期间已对返回值 retain,另一线程置 nil/释放也不 UAF。
     private let channelLock = NSLock()
     private var _channel: SecureChannel?
@@ -36,27 +37,28 @@ final class ClientConnection {
         get { channelLock.lock(); defer { channelLock.unlock() }; return _channel }
         set { channelLock.lock(); _channel = newValue; channelLock.unlock() }
     }
-
-    /// 启动发现。发现首个服务即连接。
-    func start() {
-        let browser = NWBrowser(for: .bonjour(type: "_zhikong._tcp", domain: nil), using: .init())
-        browser.browseResultsChangedHandler = { [weak self] results, _ in
-            guard let self, self.connection == nil, let first = results.first else { return }
-            self.connect(to: first.endpoint)
-        }
-        browser.start(queue: queue)
-        self.browser = browser
-        onStateChange?("正在搜索被控 Mac…")
+    /// 当前连接。与 `channel` 同理加锁:写在内部队列,读还来自主线程(sendFramed,输入事件/剪贴板)。
+    /// 之前无保护的跨线程读写存在 ARC 竞态(读线程取引用恰逢写线程释放 → UAF),与 channel 同方案修复。
+    private let connLock = NSLock()
+    private var _connection: NWConnection?
+    private var connection: NWConnection? {
+        get { connLock.lock(); defer { connLock.unlock() }; return _connection }
+        set { connLock.lock(); _connection = newValue; connLock.unlock() }
     }
 
-    /// 外网模式:出站连中转(替代 Bonjour 发现)。复用同一 receive()/send()/route()。
-    /// 连上后先发握手声明 CLIENT+房间,中转据此与 Host 配对。
-    func startRelay(_ config: RelayConfig) {
-        relayConfig = config
-        // 外网链路端到端加密:Client 发输入(C2H)、收视频/音频(H2C)。
-        channel = SecureChannel(secret: config.effectiveSecret, sending: .clientToHost)
-        onStateChange?("正在连接中转…")
-        connectToRelay()
+    /// 启动发现。发现首个服务即连接。线程安全:工作体在内部队列执行。
+    func start() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let browser = NWBrowser(for: .bonjour(type: "_zhikong._tcp", domain: nil), using: .init())
+            browser.browseResultsChangedHandler = { [weak self] results, _ in
+                guard let self, self.connection == nil, let first = results.first else { return }
+                self.connect(to: first.endpoint)
+            }
+            browser.start(queue: self.queue)
+            self.browser = browser
+            self.onStateChange?("正在搜索被控 Mac…")
+        }
     }
 
     /// 换远控码(房间)重连:断开当前连接,用新房间重新连中转。在内部队列上执行以避免与回调竞争。
@@ -114,6 +116,8 @@ final class ClientConnection {
         let conn = NWConnection(to: endpoint, using: NWParameters(tls: nil, tcp: tcpOptions))
         conn.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
+            // 仅当回调对应的仍是当前连接才处理(防迟到的旧连接回调污染状态)。
+            guard conn === self.connection else { return }
             switch state {
             case .ready:
                 self.onStateChange?("已连接")
@@ -126,8 +130,8 @@ final class ClientConnection {
                 break
             }
         }
-        conn.start(queue: queue)
         connection = conn
+        conn.start(queue: queue)
     }
 
     private func receive() {
@@ -153,12 +157,19 @@ final class ClientConnection {
                     }
                 }
             }
+            // 解帧器中毒(对端/中转宣告异常帧长,流已无法重对齐)→ 断开;重连会换新 framer。
+            if self.framer.poisoned {
+                NSLog("[直控-Client] 接收流帧长异常,断开连接")
+                conn?.cancel()
+                return
+            }
             if error == nil && !isComplete {
                 self.receive() // 继续递归收下一块。
             } else {
-                self.onStateChange?("连接断开")
-                self.onDisconnect?()
-                self.connection = nil
+                // 出错或对端半关(EOF):统一 cancel,让 stateUpdateHandler(.cancelled)做
+                // 断开回调与(外网)重连调度。之前这里直接置 connection=nil,导致随后到来的
+                // .failed/.cancelled 因身份失配被跳过 → 外网模式不会自动重连。
+                conn?.cancel()
             }
         }
     }
@@ -205,12 +216,16 @@ final class ClientConnection {
         connection.send(content: StreamFramer.frame(body), completion: .contentProcessed { _ in })
     }
 
+    /// 停止发现/连接。线程安全:工作体在内部队列执行(与 start/reconnect 由队列保序)。
+    /// 刻意**强捕获 self**:上层 stop 后可能立刻释放本对象,弱捕获会跳过清理块 → 连接/浏览器泄漏。
     func stop() {
-        relayConfig = nil   // 停止外网重连循环
-        channel = nil
-        connection?.cancel()
-        browser?.cancel()
-        connection = nil
-        browser = nil
+        queue.async {
+            self.relayConfig = nil   // 停止外网重连循环
+            self.channel = nil
+            self.connection?.cancel()
+            self.browser?.cancel()
+            self.connection = nil
+            self.browser = nil
+        }
     }
 }
