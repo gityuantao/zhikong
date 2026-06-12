@@ -41,6 +41,8 @@ final class HostController: NSObject {
     private static let savedRoomKey = "zhikong.hostRoom"
     /// 外网中转配置(若有)。决定服务走中转还是局域网,以及展示的远控码。
     private var relayConfig: RelayConfig?
+    /// 局域网模式的端到端口令(可选,ZHIKONG_SECRET / relay.conf 第 2 字段)。配了 → LAN 也加密。
+    private var lanSecret: String?
     /// 是否允许被远程控制(开关)。关 → 停止服务,中转上无 Host 在场,连不上。
     private var serving = true
     private var clientConnected = false
@@ -53,7 +55,65 @@ final class HostController: NSObject {
         peerActiveLock.lock(); defer { peerActiveLock.unlock() }; return _peerActive
     }
     private func setPeerActive(_ v: Bool) {
-        peerActiveLock.lock(); _peerActive = v; peerActiveLock.unlock()
+        peerActiveLock.lock()
+        let was = _peerActive
+        _peerActive = v
+        peerActiveLock.unlock()
+        // 新观看者上线:下一帧直接编关键帧——活动画面下不用等关键帧间隔(~1s)/静止重发(0.5s),立即出图。
+        if v && !was { setForceKeyframeNext() }
+    }
+
+    /// 「下一帧强制关键帧」标记 —— Client 的 ZKKR 请求 / 新观看者上线 / 捕获恢复都置它,
+    /// 捕获回调编码时消费(置位/消费分别在网络与捕获线程,锁保护)。幂等:多次置位只多编一个关键帧。
+    private let keyframeFlagLock = NSLock()
+    private var _forceKeyframeNext = false
+    private func setForceKeyframeNext() {
+        keyframeFlagLock.lock(); _forceKeyframeNext = true; keyframeFlagLock.unlock()
+    }
+    private func consumeForceKeyframe() -> Bool {
+        keyframeFlagLock.lock(); defer { keyframeFlagLock.unlock() }
+        let v = _forceKeyframeNext; _forceKeyframeNext = false; return v
+    }
+
+    // MARK: - 捕获自愈
+
+    /// 捕获重启的指数退避(秒)。成功后复位;上限 30s。
+    private var captureBackoff: TimeInterval = 1
+    /// 代号:stop()/切角色时 +1,使所有挂起的重启/迟到的启动结果失效(不再重启已停的捕获)。
+    private var captureGeneration = 0
+
+    /// 启动(或恢复)捕获;失败按退避自动重试。SCStream 运行中死掉(显示器深睡、登出、SCK 故障)
+    /// 走 onError → 同一条恢复路径。被控端"人在外面连不上只能干瞪眼"的最大单点,必须自愈。
+    /// 回调由引擎保证在主线程,与本控制器其余状态同线程。
+    private func startCaptureWithRetry() {
+        let gen = captureGeneration
+        capture.start { [weak self] error in
+            guard let self else { return }
+            // stop()/切角色已发生 → 迟到的成功要立即拆掉,不能留下幽灵流;迟到的失败直接忽略。
+            guard gen == self.captureGeneration else {
+                if error == nil { self.capture.stop() }
+                return
+            }
+            if let error {
+                NSLog("[直控] 启动捕获失败(可能需授权屏幕录制),稍后重试: \(error)")
+                self.scheduleCaptureRestart()
+            } else {
+                self.captureBackoff = 1
+                self.setForceKeyframeNext()   // 恢复后第一帧就是关键帧,Client 立即续上画面
+                NSLog("[直控] 捕获已启动/恢复")
+            }
+        }
+    }
+
+    /// 按当前退避调度一次重启(主线程调)。
+    private func scheduleCaptureRestart() {
+        let gen = captureGeneration
+        let delay = captureBackoff
+        captureBackoff = min(captureBackoff * 2, 30)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, gen == self.captureGeneration else { return }
+            self.startCaptureWithRetry()
+        }
     }
 
     /// 启动被控端(由顶层 AppDelegate 在选角色后调用)。
@@ -163,6 +223,9 @@ final class HostController: NSObject {
             DispatchQueue.main.async { self?.handleFeedback(clientFps: clientFps) }
         }
 
+        // Client 解不出画面时请求关键帧(ZKKR)→ 下一帧强制 IDR(标记线程安全,无需切主线程)。
+        server.onKeyframeRequest = { [weak self] in self?.setForceKeyframeNext() }
+
         // 外网模式(设了 ZHIKONG_RELAY+ZHIKONG_ROOM)→ 出站连中转;否则走局域网 Bonjour。
         if let relay = RelayConfig.load() {
             relayConfig = relay
@@ -204,11 +267,15 @@ final class HostController: NSObject {
             captionLabel.stringValue = "远控码"
             codeLabel.stringValue = currentRoom
         } else {
-            captionLabel.stringValue = "局域网模式"
+            lanSecret = RelayConfig.loadLANSecret()
+            captionLabel.stringValue = lanSecret != nil ? "局域网模式 · 已加密" : "局域网模式"
             codeLabel.font = .systemFont(ofSize: 17, weight: .medium)
             codeLabel.stringValue = "控制端自动发现"
             refreshButton.isHidden = true   // 局域网无远控码,藏刷新
             copyHint.isHidden = true        // 无码可复制
+            if lanSecret == nil {
+                NSLog("[直控] 局域网未加密(未配口令)。如需加密同网会话:两端设同一 ZHIKONG_SECRET 或 ~/.zhikong/relay.conf 第 2 字段。")
+            }
         }
         applyServing()   // 按开关(默认开)启动服务
 
@@ -218,7 +285,8 @@ final class HostController: NSObject {
         capture.onSampleBuffer = { [weak self] sampleBuffer in
             guard let self, self.isPeerActive,
                   let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-            self.encoder.encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            self.encoder.encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                                forceKeyframe: self.consumeForceKeyframe())
         }
         // 屏幕静止时低频重发最后一帧(强制关键帧):静止画面/新连入也能立刻看到,不必等用户去动一下。
         // 与 onSampleBuffer 同在捕获队列上串行调用,编码 PTS 仍单调(host 时钟)。
@@ -226,7 +294,15 @@ final class HostController: NSObject {
             guard let self, self.isPeerActive else { return }
             self.encoder.encode(pb, pts: pts, forceKeyframe: true)
         }
-        capture.onError = { error in NSLog("[直控] 捕获错误: \(error)") }
+        // 捕获中途死掉(显示器深睡/登出/SCK 故障)→ 拆干净后按退避自动恢复,不能让被控端永久黑屏。
+        capture.onError = { [weak self] error in
+            NSLog("[直控] 捕获中断,将自动恢复: \(error)")
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.capture.stop()
+                self.scheduleCaptureRestart()
+            }
+        }
 
         // 音频侧:系统音频帧 → (AAC/PCM)AudioPacket → 经同一连接推给 Client(回调在捕获音频队列,线程安全)。
         // 一帧经 AAC 编码可能产出 0..N 个包(每包 1024 样本),逐个发送。无人观看时同样跳过。
@@ -245,14 +321,12 @@ final class HostController: NSObject {
             }
         }
 
-        Task {
-            do { try await capture.start() }
-            catch { NSLog("[直控] 启动捕获失败(可能需授权屏幕录制): \(error)") }
-        }
+        startCaptureWithRetry()
     }
 
     /// 停止(由顶层 AppDelegate 在退出时调用)。
     func stop() {
+        captureGeneration += 1   // 使挂起的捕获重启/迟到的启动结果全部失效
         capture.stop()
         encoder.stop()
         server.stop()
@@ -311,7 +385,7 @@ final class HostController: NSObject {
         server.stop()
         clientConnected = false
         if serving {
-            if let relay = relayConfig { server.startRelay(relay) } else { server.start() }
+            if let relay = relayConfig { server.startRelay(relay) } else { server.start(secret: lanSecret) }
         }
         refreshStatus()
     }

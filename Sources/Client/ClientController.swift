@@ -30,6 +30,11 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     /// 外网中转基配置(地址 + 口令);连接时以它为底 `with(room:)`。nil=局域网(无需码)。
     private var relayConfigBase: RelayConfig?
+    /// 局域网模式的端到端口令(可选)。配了 → LAN 会话也加密(两端须一致)。
+    private var lanSecret: String?
+    /// 本次连接尝试中,传输层是否就绪过(TCP 连上了被控端/中转)。
+    /// 用于把超时失败分成两类:根本连不上 vs 连上了但收不到画面(口令不符/权限)。
+    private var sawTransportReady = false
     private let conn = ClientConnection()
     private let builder = HEVCSampleBufferBuilder()
     private let audioPlayer = AudioPlayer()
@@ -214,7 +219,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             startFeedbackTimer()
         } else {                          // 局域网
             beginConnecting()
-            conn.start()
+            conn.start(secret: lanSecret)
         }
         // 注意:此处**不再**直接 openSession()。会话窗只在拿到正向信号(被控端在线 / 收到首帧)后才开,
         // 见 onPeerPresence / onPacket → openSession();失败则 connectTimedOut() 留在小窗报错。
@@ -226,6 +231,7 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         firstFrameReceived = false
         peerOnline = false
         sawPeerPresence = false
+        sawTransportReady = false
         controlView.clear()
         connectButton.isEnabled = true       // 连接中保持可点 → 充当「取消」
         connectButton.title = "取消"
@@ -241,7 +247,9 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         guard connecting else { return }
         let reason: String
         if relayConfigBase == nil {
-            reason = "未发现局域网被控端。请确认对方已打开「直控」选『被控端』，且在同一网络。"
+            reason = sawTransportReady
+                ? "已连上被控端但收不到画面。请检查:两端口令是否一致(ZHIKONG_SECRET / relay.conf)、被控端是否已授权『屏幕录制』。"
+                : "未发现局域网被控端。请确认对方已打开「直控」选『被控端』，且在同一网络。"
         } else if sawPeerPresence {
             reason = "被控端不在线。请确认对方已打开「直控」、勾选『允许远程控制』，且远控码一致。"
         } else {
@@ -388,6 +396,10 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         conn.onStateChange = { [weak self] text in
             DispatchQueue.main.async { self?.setConnectStatus(text) }
         }
+        // 传输层就绪(TCP 连上被控端/中转)——记下,供超时报错区分"连不上"与"连上但收不到画面"。
+        conn.onReady = { [weak self] in
+            DispatchQueue.main.async { self?.sawTransportReady = true }
+        }
         // 中转报来被控端在线状态。驱动三件事:
         //  ① 连接中 + 在线 → 打开会话窗(正向信号);② 连接中 + 不在线 → 留在小窗等待;
         //  ③ 会话中 + 掉线 → 起宽限,超时回连接窗(被控端退出);④ 会话中 + 恢复在线 → 取消宽限、续播。
@@ -443,7 +455,10 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             guard let self else { return }
             self.recvFrameLock.lock(); self.recvFrameCount += 1; self.recvFrameLock.unlock()
             guard let sample = self.builder.build(from: packet) else {
-                NSLog("[直控-Client] 重建 CMSampleBuffer 失败(pts=\(packet.pts), key=\(packet.isKeyframe))")
+                // 解不出画面(中途加入还没等到关键帧 / 丢包失序)→ 主动要一个关键帧(已限频 0.5s),
+                // 画面恢复从"等关键帧间隔"变"下一帧"。
+                self.conn.requestKeyframe()
+                NSLog("[直控-Client] 重建 CMSampleBuffer 失败(pts=\(packet.pts), key=\(packet.isKeyframe)),已请求关键帧")
                 return
             }
             DispatchQueue.main.async {
@@ -487,7 +502,8 @@ final class ClientController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             codeField.stringValue = relay.room.isEmpty ? lastUsed : relay.room
         } else {
             relayConfigBase = nil
-            captionLabel.stringValue = "局域网模式 · 无需远控码"
+            lanSecret = RelayConfig.loadLANSecret()
+            captionLabel.stringValue = lanSecret != nil ? "局域网模式(加密) · 无需远控码" : "局域网模式 · 无需远控码"
             codeField.stringValue = ""
             codeField.placeholderString = "—"
             codeField.isEnabled = false

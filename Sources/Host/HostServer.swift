@@ -16,6 +16,8 @@ final class HostServer {
     var onClipboard: ((String) -> Void)?
     /// 收到 Client 链路反馈(近 1s 收帧 fps)时回调(在内部串行队列上),供自适应码率。
     var onFeedback: ((Double) -> Void)?
+    /// 收到 Client 关键帧请求(magic ZKKR)时回调(在内部串行队列上)。上层置"下一帧强制关键帧"。
+    var onKeyframeRequest: (() -> Void)?
     /// 中转告知对端(控制端)是否在线(在内部串行队列上)。仅外网中转模式有。
     var onPeerPresence: ((Bool) -> Void)?
 
@@ -48,9 +50,12 @@ final class HostServer {
     }
 
     /// 启动监听并开始 Bonjour 广播。线程安全:工作体在内部队列执行。
-    func start(serviceName: String = "ZhiKong-Studio") {
+    /// `secret` 非空 → 局域网会话也走端到端加密(ChaCha20-Poly1305,与外网同一套 SecureChannel);
+    /// 为空 → 保持零配置明文(向后兼容,适合完全可信的家庭局域网)。
+    func start(serviceName: String = "ZhiKong-Studio", secret: String? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
+            self.channel = secret.map { SecureChannel(secret: $0, sending: .hostToClient) }
             let tcpOptions = NWProtocolTCP.Options()
             tcpOptions.noDelay = true   // 关闭 Nagle:小包立即发,避免实时视频流"攒包→突发"的顿挫
             let params = NWParameters(tls: nil, tcp: tcpOptions)
@@ -193,12 +198,14 @@ final class HostServer {
                     } else {
                         plain = payload
                     }
-                    // 反向通道可能携带:剪贴板(ZKC1)/ 链路反馈(ZKFB)/ 输入事件。按 magic 分流。
+                    // 反向通道可能携带:剪贴板(ZKC1)/ 链路反馈(ZKFB)/ 关键帧请求(ZKKR)/ 输入事件。按 magic 分流。
                     let head = Array(plain.prefix(4))
                     if head == ClipboardMessage.magic {
                         if let text = ClipboardMessage.decode(plain) { self.onClipboard?(text) }
                     } else if head == FeedbackMessage.magic {
                         if let fps = FeedbackMessage.decode(plain) { self.onFeedback?(fps) }
+                    } else if KeyframeRequest.isRequest(plain) {
+                        self.onKeyframeRequest?()
                     } else if let event = InputEvent.decode(plain) {
                         self.onInputEvent?(event)
                     }

@@ -36,28 +36,48 @@ final class ScreenCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         return (even(Double(displayW) * scale), even(Double(displayH) * scale))
     }
 
-    func start() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = DisplaySelector.main(from: content.displays, preferring: CGMainDisplayID()) else {
-            throw CaptureError.noDisplay
+    /// 启动捕获。完成后在**主队列**回调:`error == nil` 即成功。
+    /// 刻意用 SCK 的回调式 API 而非 async/await:调用方(HostController 的退避自愈)在主线程语境,
+    /// 回调式没有 @Sendable 跨域告警,也与全仓 Dispatch 风格一致。
+    func start(completion: @escaping (Error?) -> Void) {
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error { completion(error); return }
+                guard let display = DisplaySelector.main(from: content?.displays ?? [],
+                                                         preferring: CGMainDisplayID()) else {
+                    completion(CaptureError.noDisplay); return
+                }
+                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let (w, h) = ScreenCaptureEngine.outputSize(displayW: display.width, displayH: display.height,
+                                                            maxDimension: self.maxDimension)
+                if w != display.width { NSLog("[直控] 外网降分辨率 %dx%d → %dx%d", display.width, display.height, w, h) }
+                // showsCursor=false:画面里不含系统光标。Client 端自绘合成光标(零延迟、永远准确),
+                // 避免"被注入移动时系统不渲染光标 → 看不到指针"以及双光标问题。
+                let settings = CaptureSettings(width: w, height: h, fps: 60, showsCursor: false)
+                let config = settings.makeStreamConfiguration()
+                let stream = SCStream(filter: filter, configuration: config, delegate: self)
+                do {
+                    try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.sampleQueue)
+                } catch {
+                    completion(error); return
+                }
+                // 音频输出:失败不致命(没声音也能远控),仅记录。
+                if config.capturesAudio {
+                    do { try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.audioQueue) }
+                    catch { NSLog("[直控] 添加音频输出失败(继续无声): \(error)") }
+                }
+                stream.startCapture { [weak self] err in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        if let err { completion(err); return }
+                        self.stream = stream
+                        self.startIdleResend()
+                        completion(nil)
+                    }
+                }
+            }
         }
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let (w, h) = ScreenCaptureEngine.outputSize(displayW: display.width, displayH: display.height, maxDimension: maxDimension)
-        if w != display.width { NSLog("[直控] 外网降分辨率 %dx%d → %dx%d", display.width, display.height, w, h) }
-        // showsCursor=false:画面里不含系统光标。Client 端自绘合成光标(零延迟、永远准确),
-        // 避免"被注入移动时系统不渲染光标 → 看不到指针"以及双光标问题。
-        let settings = CaptureSettings(width: w, height: h, fps: 60, showsCursor: false)
-        let config = settings.makeStreamConfiguration()
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
-        // 音频输出:失败不致命(没声音也能远控),仅记录。
-        if config.capturesAudio {
-            do { try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue) }
-            catch { NSLog("[直控] 添加音频输出失败(继续无声): \(error)") }
-        }
-        try await stream.startCapture()
-        self.stream = stream
-        startIdleResend()
     }
 
     /// 静止重发心跳:屏幕约 `idleResendInterval` 内无新 `.complete` 帧 → 用缓存的最后一帧补发一次(强制关键帧)。

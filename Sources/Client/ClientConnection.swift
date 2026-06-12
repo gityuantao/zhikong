@@ -17,6 +17,9 @@ final class ClientConnection {
     var onPeerPresence: ((Bool) -> Void)?
     /// 连接状态文案变化时回调(在内部串行队列上),供 UI 显示。
     var onStateChange: ((String) -> Void)?
+    /// 传输层就绪(TCP .ready,LAN 直连或连上中转)时回调(内部串行队列)。
+    /// 供上层区分"根本连不上"和"连上了但收不到画面(口令不符/权限)"两类失败。
+    var onReady: (() -> Void)?
     /// 连接断开/失败时回调(内部串行队列)。供上层清理(如清空音频播放队列)。
     var onDisconnect: (() -> Void)?
 
@@ -47,9 +50,11 @@ final class ClientConnection {
     }
 
     /// 启动发现。发现首个服务即连接。线程安全:工作体在内部队列执行。
-    func start() {
+    /// `secret` 非空 → 局域网会话也走端到端加密(两端须一致,与 HostServer.start 对称)。
+    func start(secret: String? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
+            self.channel = secret.map { SecureChannel(secret: $0, sending: .clientToHost) }
             let browser = NWBrowser(for: .bonjour(type: "_zhikong._tcp", domain: nil), using: .init())
             browser.browseResultsChangedHandler = { [weak self] results, _ in
                 guard let self, self.connection == nil, let first = results.first else { return }
@@ -90,6 +95,7 @@ final class ClientConnection {
             case .ready:
                 conn.send(content: config.handshake(role: "CLIENT"), completion: .contentProcessed { _ in })
                 self.onStateChange?("已连中转(房间 \(config.room))")
+                self.onReady?()
                 self.receive()
             case .failed, .cancelled:
                 // 仅当回调对应的仍是当前连接才处理(换房间重连时旧连接的 cancel 会走到这里,须跳过)。
@@ -121,6 +127,7 @@ final class ClientConnection {
             switch state {
             case .ready:
                 self.onStateChange?("已连接")
+                self.onReady?()
                 self.receive()
             case .failed, .cancelled:
                 self.onStateChange?("连接断开")
@@ -201,6 +208,20 @@ final class ClientConnection {
     /// 发送链路反馈(近 1s 收帧 fps,magic ZKFB)给 Host,供其自适应码率。
     func sendFeedback(fps: Double) {
         sendFramed(FeedbackMessage.encode(fps: fps))
+    }
+
+    /// 向 Host 请求一个关键帧(magic ZKKR)。**限频 0.5s**:中途加入时在关键帧到来前,
+    /// 每个解不出的 delta 帧都会想要请求——不限频会形成请求风暴(虽然 Host 侧幂等,但纯属浪费)。
+    /// 可从任意线程调(限频状态锁保护)。
+    private let kfLock = NSLock()
+    private var lastKeyframeRequest: TimeInterval = 0
+    func requestKeyframe() {
+        let now = ProcessInfo.processInfo.systemUptime
+        kfLock.lock()
+        guard now - lastKeyframeRequest >= 0.5 else { kfLock.unlock(); return }
+        lastKeyframeRequest = now
+        kfLock.unlock()
+        sendFramed(KeyframeRequest.encode())
     }
 
     /// 统一发送口:外网模式先端到端加密载荷,再长度前缀分帧;加密失败丢弃(绝不退明文)。

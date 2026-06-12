@@ -38,6 +38,13 @@ struct RelayConfig {
         return RelayConfig(host: host, port: port, room: room, secret: secret)
     }
 
+    /// 局域网模式的端到端口令(可选):`ZHIKONG_SECRET` / relay.conf 第 2 字段(地址字段可不存在)。
+    /// 配了 → 局域网会话同样走 ChaCha20-Poly1305(两端一致);没配 → 保持零配置明文(向后兼容)。
+    static func loadLANSecret() -> String? {
+        let env = ProcessInfo.processInfo.environment
+        return clean(env["ZHIKONG_SECRET"]) ?? clean(fileField(1))
+    }
+
     /// relay.conf 首行有效配置的第 index 个字段(空格分隔;# 注释/空行跳过)。无则 nil。
     private static func fileField(_ index: Int) -> String? {
         let path = (NSHomeDirectory() as NSString).appendingPathComponent(".zhikong/relay.conf")
