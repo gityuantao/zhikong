@@ -37,7 +37,8 @@ VideoToolbox (HEVC), and Network.framework — no third-party SDKs.
 
 - **Native HEVC pipeline** — ScreenCaptureKit capture → VideoToolbox hardware HEVC encode →
   `AVSampleBufferDisplayLayer` decode/display with a rate-based jitter buffer.
-- **LAN with zero config** — Bonjour auto-discovery, no server needed.
+- **LAN with zero config** — Bonjour auto-discovery, no server needed. Optionally encrypted:
+  set the same `ZHIKONG_SECRET` on both Macs and LAN sessions use the same E2E channel as WAN.
 - **Internet via your own relay** — a tiny Python relay (`server/`) you host; the app ships
   with **no built-in relay address** (you point it at yours).
 - **End-to-end encryption** — ChaCha20-Poly1305 (CryptoKit), HKDF-derived key, per-frame
@@ -50,8 +51,11 @@ VideoToolbox (HEVC), and Network.framework — no third-party SDKs.
 - **Clipboard sync** — bidirectional plain-text, over the same encrypted channel.
 - **Adaptive bitrate** (opt-in) — client reports received FPS; the Host runs a protective
   AIMD controller to back off under congestion.
+- **Fast recovery** — the client requests an instant keyframe when it can't decode (mid-stream
+  join, loss); the Host forces one for new viewers; capture auto-restarts with backoff if
+  ScreenCaptureKit dies (display deep-sleep, logout), so the resident Host heals itself.
 - **Input passthrough** — mouse, keyboard, scroll, and Mission Control / Spaces gestures.
-- **~73 unit tests** covering crypto, framing, codecs, layout, and config parsing.
+- **~77 unit tests** covering crypto, framing, codecs, layout, and config parsing.
 
 ## Screenshots
 
@@ -143,7 +147,7 @@ your-relay-host:7777  a-long-random-shared-secret
 | `ZHIKONG_ROLE` | `host` or `client` — skip the role picker |
 | `ZHIKONG_LAN` | `1` — force LAN (Bonjour), ignore any relay config |
 | `ZHIKONG_RELAY` | `host:port` — relay address (unset ⇒ LAN) |
-| `ZHIKONG_SECRET` | end-to-end shared secret (**never sent to the relay**) |
+| `ZHIKONG_SECRET` | end-to-end shared secret (**never sent to the relay**); when set, LAN sessions are encrypted too |
 | `ZHIKONG_ROOM` | fixed room code (testing; default is dynamic) |
 | `ZHIKONG_ADAPTIVE` | `1` — enable adaptive bitrate |
 | `ZHIKONG_WAN_BITRATE` / `..._MAXDIM` / `..._KEYFRAME` / `..._BITRATE_MAX` | encoder tuning for WAN |
@@ -161,6 +165,10 @@ Precedence: env vars > `~/.zhikong/relay.conf` > LAN default.
   short 6-character room code — anyone who can observe the pairing handshake can then derive the
   key. The app logs a warning in this fallback mode. This is *not* real E2E security; it exists
   only as a zero-config convenience.
+- **LAN mode is plaintext and unauthenticated by default** (zero-config convenience for a fully
+  trusted home network — any device on the LAN could connect and inject input while the Host is
+  serving). Set the same `ZHIKONG_SECRET` on both Macs to encrypt + authenticate LAN sessions
+  with the same ChaCha20-Poly1305 channel used over the relay.
 - **Not yet implemented:** PAKE (so a short code is safe even against the relay operator), a
   per-connection confirmation prompt on the Host, and **anti-replay** (frames carry no sequence
   number, so an active attacker who controls the relay could record and replay old encrypted
